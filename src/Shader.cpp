@@ -32,17 +32,31 @@ unsigned int CompileShader(unsigned int type, const std::string& source)
     return id;
 }
 
-int CreateShader(const std::string& vertexShader, const std::string& fragmentShader) 
+unsigned int CreateShader(const std::string& vertexShader, const std::string& fragmentShader) 
 {
-    unsigned int program = glCreateProgram();
+    
     unsigned int vs = CompileShader(GL_VERTEX_SHADER, vertexShader);
     unsigned int fs = CompileShader(GL_FRAGMENT_SHADER, fragmentShader);
+
+    if (!vs || !fs) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        return 0;
+    }
+    unsigned int program = glCreateProgram();
 
     glAttachShader(program, vs);
     glAttachShader(program, fs);
     glLinkProgram(program);
-    glValidateProgram(program);
-
+    int ok = 0;
+    glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[1024];
+        glGetProgramInfoLog(program, sizeof(log), nullptr, log);
+        std::cerr << "Shader link failed:\n" << log << std::endl;
+        glDeleteProgram(program);
+        program = 0;
+    }
 
     glDeleteShader(vs);
     glDeleteShader(fs);
@@ -58,6 +72,7 @@ std::string ReadFile(const std::string& path)
         std::cerr << "Failed to open file: " << path << std::endl;
         return "";
     }
+    
     std::stringstream buffer;
     buffer << file.rdbuf();
     return buffer.str();
