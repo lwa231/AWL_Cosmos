@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 
+
 enum class Shape { Circle, Triangle, Count };
 
 // Graphics Objects Data: owns the shared GPU buffers (one VAO/VBO/EBO) that hold every
@@ -31,3 +32,4 @@ class GOD
         std::vector<float> vertexData;        // CPU copy of every shape's vertices
         std::vector<unsigned int> indexData;  // CPU copy of every shape's indices (already offset)
 };
+

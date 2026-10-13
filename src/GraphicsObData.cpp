@@ -4,7 +4,8 @@
 
 const double PI = std::acos(-1.0);
 
-GOD::~GOD() {
+GOD::~GOD() // frees the GL objects
+{
     // 0 means "never created"; deleting only what exists keeps this safe
     if (ebo) glDeleteBuffers(1, &ebo);
     if (vbo) glDeleteBuffers(1, &vbo);
@@ -12,8 +13,8 @@ GOD::~GOD() {
 }
 
 // Appends a shape's LOCAL data (indices start at 0) and records where it lives.
-void GOD::addShape(Shape s, const std::vector<float>& verts,
-                            const std::vector<unsigned int>& idx) {
+void GOD::addShape(Shape s, const std::vector<float>& verts, const std::vector<unsigned int>& idx) 
+{
     unsigned int baseVertex = vertexData.size() / 3; // vertices already stored
     entries[(int)s] = { (unsigned int)indexData.size(), (int)idx.size() };
 
@@ -22,7 +23,8 @@ void GOD::addShape(Shape s, const std::vector<float>& verts,
         indexData.push_back(i + baseVertex);   // shift into the shared buffer
 }
 
-void GOD::addCircle(int segments) {
+void GOD::addCircle(int segments) //create a circle shape and register it
+{
     std::vector<float> verts = {0.0f, 0.0f, 0.0f};      // center
     std::vector<unsigned int> idx;
 
@@ -40,8 +42,10 @@ void GOD::addCircle(int segments) {
     addShape(Shape::Circle, verts, idx);
 }
 
-void GOD::addTriangle() {
-    std::vector<float> verts = {
+void GOD::addTriangle() //create a triangle shape and register it
+{
+    std::vector<float> verts = 
+    {
         0.0f,  0.0f, 0.0f,
         -1.0f, 0.4f, 0.0f,   
         -1.0f, -0.4f, 0.0f  
@@ -50,26 +54,24 @@ void GOD::addTriangle() {
     addShape(Shape::Triangle, verts, idx);
 }
 
-void GOD::upload() {
+void GOD::upload() //manage buffers and send data to GPU; needs a GL context
+{
     glGenVertexArrays(1, &vao);
     glGenBuffers(1, &vbo);
     glGenBuffers(1, &ebo);
 
     glBindVertexArray(vao);                              // VAO first: it records what follows
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, vertexData.size() * sizeof(float),
-                 vertexData.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, vertexData.size() * sizeof(float), vertexData.data(), GL_STATIC_DRAW);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);          // bind BEFORE upload
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexData.size() * sizeof(unsigned int),
-                 indexData.data(), GL_STATIC_DRAW);
-
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexData.size() * sizeof(unsigned int), indexData.data(), GL_STATIC_DRAW);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
 }
 
-void GOD::draw(Shape s) const {
+void GOD::draw(Shape s) const 
+{
     const Entry& e = entries[(int)s];
     glBindVertexArray(vao);
-    glDrawElements(GL_TRIANGLES, e.indexCount, GL_UNSIGNED_INT,
-                   (void*)(e.firstIndex * sizeof(unsigned int)));  // BYTE offset into the EBO
+    glDrawElements(GL_TRIANGLES, e.indexCount, GL_UNSIGNED_INT, (void*)(e.firstIndex * sizeof(unsigned int)));  // BYTE offset into the EBO
 }
