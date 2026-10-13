@@ -1,8 +1,13 @@
-cmake_minimum_required(VERSION 3.10.0)
+cmake_minimum_required(VERSION 3.21)
 project(AWL_Cosmos VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Default to a Debug build when none is chosen (the "default" preset also sets this)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+endif()
 
 find_package(glfw3 REQUIRED)
 find_package(OpenGL REQUIRED)
@@ -17,6 +22,13 @@ add_executable(AWL_Cosmos
     src/GraphicsObData.cpp
 )
 target_include_directories(AWL_Cosmos PRIVATE src)
+
+# Warnings for our own code only (not the bundled GLAD)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(AWL_Cosmos PRIVATE -Wall -Wextra)
+elseif(MSVC)
+    target_compile_options(AWL_Cosmos PRIVATE /W4)
+endif()
 
 # Copy shaders next to the exe after every build
 add_custom_command(TARGET AWL_Cosmos POST_BUILD
