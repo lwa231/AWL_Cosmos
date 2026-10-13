@@ -20,6 +20,7 @@ add_executable(AWL_Cosmos
     src/main.cpp
     src/Shader.cpp
     src/GraphicsObData.cpp
+    src/SimulationLogic.cpp
 )
 target_include_directories(AWL_Cosmos PRIVATE src)
 
