@@ -86,7 +86,7 @@ class SimLogic
         
         struct Body 
         {
-            float x, y, vx, vy, mass, radius;
+            double x, y, vx, vy, mass, radius;
             float color[3];
             Shape shape = Shape::Circle;
         };
@@ -94,7 +94,7 @@ class SimLogic
         {
 
         }
-        void InitBody(float in_x, float in_y, float in_mass, float in_radius, float in_r, float in_g, float in_b, float in_vx = 0.0, float in_vy = 0.0)
+        void InitBody(double in_x, double in_y, float in_mass, float in_radius, float in_r, float in_g, float in_b, double in_vx = 0.0, double in_vy = 0.0)
         {
             Body body{};
 
@@ -133,8 +133,18 @@ class SimLogic
         void ZeroMomentum()                // public: call once after adding bodies
         {
             double px = 0, py = 0, m = 0;
-            for (const auto& b : bodies) { px += b.mass * b.vx; py += b.mass * b.vy; m += b.mass; }
-            for (auto& b : bodies)       { b.vx -= px / m;      b.vy -= py / m; }
+            for (const auto& b : bodies) 
+            { 
+                px += b.mass * b.vx; 
+                py += b.mass * b.vy; 
+                m += b.mass; 
+            }
+            for (auto& b : bodies)       
+            { 
+                if(m == 0.0){break;}
+                b.vx -= px / m;
+                b.vy -= py / m; 
+            }
         }
         
 
@@ -261,6 +271,14 @@ int main() {
     if (colorLoc == -1) {
         std::cerr << "Failed to get uniform location for uColor" << std::endl;
     }
+    GLint starPosLoc = glGetUniformLocation(shader, "uStarPos");
+    if (starPosLoc == -1) {
+        std::cerr << "Failed to get uniform location for starPosLoc" << std::endl;
+    }
+    GLint litLoc     = glGetUniformLocation(shader, "uLit");
+    if (litLoc == -1){
+        std::cerr << "Failed to get uniform location for litLoc" << std::endl;
+    }
 
     
     sim.ResetChrono();
@@ -290,9 +308,15 @@ int main() {
 
         glClearColor(0.12f, 0.13f, 0.13f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
-
-        for (const auto& b : sim.getBodies()) {
-            glUniform1f(scaleLoc,  (float)b.radius);
+        
+        
+        const auto& bodies = sim.getBodies();
+        glUniform2f(starPosLoc, (float)bodies[0].x, (float)bodies[0].y);
+        
+        for (size_t i = 0; i < bodies.size(); ++i) {
+            const auto& b = bodies[i];
+            glUniform1f(litLoc, i == 0 ? 0.0f : 1.0f);
+            glUniform1f(scaleLoc, (float)b.radius);
             glUniform2f(offsetLoc, (float)b.x, (float)b.y);
             glUniform3f(colorLoc,  b.color[0], b.color[1], b.color[2]);
             gfx.draw(b.shape);
