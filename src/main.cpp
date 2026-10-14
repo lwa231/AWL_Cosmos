@@ -12,6 +12,7 @@
 const float WORLD_HALF_HEIGHT = 30.0f;
 const int SCREEN_WIDTH = 800;
 const int SCREEN_HEIGHT = 600;
+const int MAX_LIGHTS = 4;   // must match MAX_LIGHTS in basic.frag
 
 
 struct WindowState {
@@ -19,8 +20,6 @@ struct WindowState {
     int height; 
     bool dirty = true; // Flag to indicate if the window state has changed
 };
-
-
 
 
 // Callback function to adjust the viewport when the window is resized
@@ -31,9 +30,6 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
     state -> height = height;
     state -> dirty = true; // Mark the window state as dirty
 }
-
-
-
 
 
 int main() {
@@ -118,9 +114,21 @@ int main() {
     if (colorLoc == -1) {
         std::cerr << "Failed to get uniform location for uColor" << std::endl;
     }
-    GLint starPosLoc = glGetUniformLocation(shader, "uStarPos");
-    if (starPosLoc == -1) {
-        std::cerr << "Failed to get uniform location for starPosLoc" << std::endl;
+    GLint lightCountLoc = glGetUniformLocation(shader, "uLightCount");
+    if (lightCountLoc == -1) {
+        std::cerr << "Failed to get uniform location for uLightCount" << std::endl;
+    }
+    GLint lightPosLoc = glGetUniformLocation(shader, "uLightPos");
+    if (lightPosLoc == -1) {
+        std::cerr << "Failed to get uniform location for uLightPos" << std::endl;
+    }
+    GLint lightColorLoc = glGetUniformLocation(shader, "uLightColor");
+    if (lightColorLoc == -1) {
+        std::cerr << "Failed to get uniform location for uLightColor" << std::endl;
+    }
+    GLint ambientLoc = glGetUniformLocation(shader, "uAmbient");
+    if (ambientLoc == -1) {
+        std::cerr << "Failed to get uniform location for uAmbient" << std::endl;
     }
     GLint litLoc     = glGetUniformLocation(shader, "uLit");
     if (litLoc == -1){
@@ -131,10 +139,10 @@ int main() {
     sim.ResetChrono();
 
     //Setup Objects on the screen
-    //           x,    y,  mass,radius,r,   g,     b,    vx, vy
-    sim.InitBody(0,    0,  1000, 2.0, 1.0f, 0.85f, 0.35f, 0, 0);   // star
-    sim.InitBody(20,   0,  50,   0.8, 0.25f,0.55f, 0.85f, 0, 7.25);// planet
-    sim.InitBody(21.5, 0,  1,  0.25,0.75f,0.75f, 0.78f, 0, 7.25 + 5.80); // moon
+    //           x,    y,  mass,radius,kind,r,   g,     b,    vx, vy
+    sim.InitBody(-12, 0, 500, 1.6, BodyKind::Star, 1.0f, 0.70f, 0.30f, 0, -8.939);   // star A (inner pair)
+    sim.InitBody( -6, 0, 500, 1.6, BodyKind::Star, 1.0f, 0.80f, 1.00f, 0,  3.970);   // star B (inner pair)
+    sim.InitBody( 18, 0, 500, 1.6, BodyKind::Star, 1.0f, 0.95f, 0.60f, 0,  4.969);   // star C (outer)
     sim.ZeroMomentum();
 
 
@@ -158,11 +166,28 @@ int main() {
         
         
         const auto& bodies = sim.getBodies();
-        glUniform2f(starPosLoc, (float)bodies[0].x, (float)bodies[0].y);
+
+        // Gather every light-emitting body (stars); their color tints the light
+        float lightPos[MAX_LIGHTS * 2];
+        float lightCol[MAX_LIGHTS * 3];
+        int lightCount = 0;
+        for (const auto& b : bodies) {
+            if (!kindProps(b.kind).emitsLight || lightCount >= MAX_LIGHTS) continue;
+            lightPos[lightCount * 2 + 0] = (float)b.x;
+            lightPos[lightCount * 2 + 1] = (float)b.y;
+            for (int c = 0; c < 3; ++c)
+                lightCol[lightCount * 3 + c] = 0.5f + 0.5f * b.color[c];   // tinted toward white
+            ++lightCount;
+        }
+        glUniform1i(lightCountLoc, lightCount);
+        glUniform2fv(lightPosLoc, lightCount, lightPos);
+        glUniform3fv(lightColorLoc, lightCount, lightCol);
         
         for (size_t i = 0; i < bodies.size(); ++i) {
             const auto& b = bodies[i];
-            glUniform1f(litLoc, i == 0 ? 0.0f : 1.0f);
+            const KindProps props = kindProps(b.kind);
+            glUniform1f(litLoc, props.receivesLight ? 1.0f : 0.0f);
+            glUniform1f(ambientLoc, props.ambient);
             glUniform1f(scaleLoc, (float)b.radius);
             glUniform2f(offsetLoc, (float)b.x, (float)b.y);
             glUniform3f(colorLoc,  b.color[0], b.color[1], b.color[2]);
