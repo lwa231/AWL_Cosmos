@@ -30,7 +30,7 @@ void SimLogic::ResetChrono()
     TimeCounter = 0.0;
 }
 
-void SimLogic::InitBody(double in_x, double in_y, float in_mass, float in_radius, float in_r, float in_g, float in_b, double in_vx, double in_vy)
+void SimLogic::InitBody(double in_x, double in_y, float in_mass, float in_radius, BodyKind in_kind, float in_r, float in_g, float in_b, double in_vx, double in_vy)
 {
     Body body{};
 
@@ -40,6 +40,7 @@ void SimLogic::InitBody(double in_x, double in_y, float in_mass, float in_radius
     body.vy = in_vy;
     body.mass = in_mass;
     body.radius = in_radius;
+    body.kind = in_kind;
     body.color[0] = in_r;
     body.color[1] = in_g;
     body.color[2] = in_b;
