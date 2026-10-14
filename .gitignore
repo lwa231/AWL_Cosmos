@@ -4,6 +4,7 @@ out/
 cmake-build-*/
 CMakeUserPresets.json
 
+
 # CMake generated files (if configured in-source by accident)
 CMakeCache.txt
 CMakeFiles/
@@ -35,3 +36,6 @@ Thumbs.db
 
 # Claude Code local files
 .claude/
+
+#Planning Files for Claude
+AWL_Cosmos_Plan/
