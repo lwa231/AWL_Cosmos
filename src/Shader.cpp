@@ -65,6 +65,19 @@ unsigned int CreateShader(const std::string& vertexShader, const std::string& fr
 }
 
 
+std::string InjectDefine(const std::string& source, const std::string& name, const std::string& value)
+{
+    size_t versionPos = source.find("#version");
+    if (versionPos == std::string::npos) return source;
+
+    size_t lineEnd = source.find('\n', versionPos);
+    if (lineEnd == std::string::npos) return source;
+
+    std::string result = source;
+    result.insert(lineEnd + 1, "#define " + name + " " + value + "\n#line 2\n");
+    return result;
+}
+
 std::string ReadFile(const std::string& path)
 {
     std::ifstream file(path);
