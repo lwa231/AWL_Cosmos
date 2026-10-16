@@ -1,6 +1,6 @@
 #version 330 core
 
-const int MAX_LIGHTS = 4;      // must match MAX_LIGHTS in main.cpp
+// MAX_LIGHTS is #defined by the app at load time (see InjectDefine in Shader.cpp)
 const float LZ = 0.4;          // light tilt towards camera
 
 in vec2 vLocal;

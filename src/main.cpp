@@ -12,7 +12,7 @@
 const float WORLD_HALF_HEIGHT = 30.0f;
 const int SCREEN_WIDTH = 800;
 const int SCREEN_HEIGHT = 600;
-const int MAX_LIGHTS = 4;   // must match MAX_LIGHTS in basic.frag
+const int MAX_LIGHTS = 4;   // single source: injected into basic.frag as #define MAX_LIGHTS
 
 
 struct WindowState {
@@ -31,11 +31,8 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
     state -> dirty = true; // Mark the window state as dirty
 }
 
-
-int main() {
-
-    if (!glfwInit()) return -1;
-
+static int run()
+{
     // Ask for the same OpenGL version you picked on the GLAD site
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -49,7 +46,7 @@ int main() {
     
     if (!window) 
     { 
-        glfwTerminate(); return -1; 
+        return -1; 
     }
     
     glfwSetWindowUserPointer(window, &windowState);
@@ -77,7 +74,23 @@ int main() {
     //std::cout << "GLFW " << glfwGetVersionString() << "\n";
 
 
-    {   // scope: gfx must be destroyed BEFORE glfwTerminate (its destructor calls glDelete*)
+    // Load and validate shaders BEFORE creating any GPU objects of our own
+    std::string vertexShader = ReadFile("shaders/basic.vert");
+    std::string fragmentShader = ReadFile("shaders/basic.frag");
+
+    if (vertexShader.empty() || fragmentShader.empty()) {
+        std::cerr << "Shader files are empty, ABORTING." << std::endl;
+        return -1;
+    }
+
+    fragmentShader = InjectDefine(fragmentShader, "MAX_LIGHTS", std::to_string(MAX_LIGHTS));
+
+    unsigned int shader = CreateShader(vertexShader, fragmentShader);
+    if (shader == 0) {
+        std::cerr << "Shader creation failed, ABORTING." << std::endl;
+        return -1;
+    }
+
     SimLogic sim;
     //Graphics Objects Data
     GOD gfx;
@@ -85,18 +98,6 @@ int main() {
     //gfx.addTriangle();
     gfx.upload();
 
-
-    std::string vertexShader = ReadFile("shaders/basic.vert");
-    std::string fragmentShader = ReadFile("shaders/basic.frag");
-    
-    unsigned int shader = CreateShader(vertexShader, fragmentShader);
-    
-    if (vertexShader.empty() || fragmentShader.empty()) {
-        std::cerr << "Shader files are empty, ABORTING." << std::endl;
-        glfwTerminate();
-        return -1;
-    }
-    
     glUseProgram(shader);
     GLint halfExtentLoc = glGetUniformLocation(shader, "uHalfExtent");
     if (halfExtentLoc == -1) {
@@ -199,7 +200,14 @@ int main() {
         glfwPollEvents();
 
     }
-    }   // end of gfx scope
-    glfwTerminate();
     return 0;
+}
+
+int main() {
+
+    if (!glfwInit()) return -1;
+    int rc = run();
+
+    glfwTerminate();
+    return rc;
 }
