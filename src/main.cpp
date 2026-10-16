@@ -141,9 +141,23 @@ static int run()
 
     //Setup Objects on the screen
     //           x,    y,  mass,radius,kind,r,   g,     b,    vx, vy
-    sim.InitBody(-12, 0, 500, 1.6, BodyKind::Star, 1.0f, 0.70f, 0.30f, 0, -8.939);   // star A (inner pair)
-    sim.InitBody( -6, 0, 500, 1.6, BodyKind::Star, 1.0f, 0.80f, 1.00f, 0,  3.970);   // star B (inner pair)
-    sim.InitBody( 18, 0, 500, 1.6, BodyKind::Star, 1.0f, 0.95f, 0.60f, 0,  4.969);   // star C (outer)
+       //Pseudo galaxy: black central mass + dust rings
+    const int    DUST   = 350;      // Debug build: keep ~300.  Release build: up to ~1000
+    const double M_CORE = 120.0;
+    const double RINGS[7] = { 1.5, 4.5, 7.5, 11.0, 15.0, 19.5, 25.0 };
+
+    sim.InitBody(0, 0, M_CORE, 1.2, BodyKind::Star, 0.0f, 0.0f, 0.0f, 0, 0);   // the black core
+
+    for (int i = 0; i < DUST; ++i) {
+        double jitter = (std::fmod(i * 0.6180339887, 1.0) - 0.5) * 1.2;    // spreads each ring ±0.6
+        double r  = RINGS[i % 7] + jitter;
+        double th = i * 2.39996323;                                         // golden angle: even spread
+        double v  = std::sqrt(M_CORE * r * r / std::pow(r * r + 0.01, 1.5)); // circular speed incl. softening
+        float  t  = (float)((r - 3.0) / 24.0);                              // 0 inner .. 1 outer
+        sim.InitBody(r * std::cos(th), r * std::sin(th), 1e-6, 0.08, BodyKind::Star,
+                     1.0f - 0.4f * t, 0.85f - 0.1f * t, 0.6f + 0.4f * t,    // warm inner -> blue outer
+                     -v * std::sin(th), v * std::cos(th));
+    }
     sim.ZeroMomentum();
 
 
