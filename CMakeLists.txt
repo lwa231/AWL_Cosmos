@@ -19,6 +19,11 @@ target_include_directories(glad PUBLIC external/glad/include)
 # cosmos_core: physics library. No OpenGL/GLFW here, so it can run headless (tests).
 add_library(cosmos_core STATIC
     src/core/Version.cpp
+    src/core/bodies.cpp
+    src/core/gravity.cpp
+    src/core/integrators.cpp
+    src/core/diagnostics.cpp
+    src/core/kepler.cpp
 )
 target_include_directories(cosmos_core PUBLIC src)
 # PUBLIC so header-inline math in every consumer is compiled with the same float rules (determinism)
@@ -31,6 +36,14 @@ endif()
 enable_testing()
 add_executable(cosmos_tests
     tests/test_main.cpp
+    tests/test_constants.cpp
+    tests/test_vec3.cpp
+    tests/test_bodies.cpp
+    tests/test_gravity.cpp
+    tests/test_kdk.cpp
+    tests/test_diagnostics.cpp
+    tests/test_kepler.cpp
+    tests/test_kepler_roundtrip.cpp
 )
 target_include_directories(cosmos_tests PRIVATE external/doctest)
 target_link_libraries(cosmos_tests PRIVATE cosmos_core)
