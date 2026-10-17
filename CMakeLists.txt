@@ -24,6 +24,8 @@ add_library(cosmos_core STATIC
     src/core/integrators.cpp
     src/core/diagnostics.cpp
     src/core/kepler.cpp
+    src/core/placement.cpp
+    src/core/hierarchy.cpp
 )
 target_include_directories(cosmos_core PUBLIC src)
 # PUBLIC so header-inline math in every consumer is compiled with the same float rules (determinism)
@@ -44,6 +46,9 @@ add_executable(cosmos_tests
     tests/test_diagnostics.cpp
     tests/test_kepler.cpp
     tests/test_kepler_roundtrip.cpp
+    tests/test_radii.cpp
+    tests/test_placement.cpp
+    tests/test_hierarchy.cpp
 )
 target_include_directories(cosmos_tests PRIVATE external/doctest)
 target_link_libraries(cosmos_tests PRIVATE cosmos_core)
