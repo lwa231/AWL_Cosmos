@@ -29,6 +29,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(cosmos_core PRIVATE -Wall -Wextra)
 endif()
 
+# cosmos_app: clock, warp, simulation driver, interpolation, camera math (plan 4.1 app/). No GL, so tests can use it.
+file(GLOB COSMOS_APP_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/app/*.cpp)
+add_library(cosmos_app STATIC ${COSMOS_APP_SOURCES})
+target_link_libraries(cosmos_app PUBLIC cosmos_core)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(cosmos_app PRIVATE -Wall -Wextra)
+endif()
+
 # Headless tests: link only against core (no window, no GPU)
 enable_testing()
 file(GLOB COSMOS_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/*.cpp)
@@ -36,16 +44,15 @@ add_executable(cosmos_tests ${COSMOS_TEST_SOURCES})
 target_include_directories(cosmos_tests PRIVATE external/doctest)
 # Tests find scenes/ through this absolute path (plan section 11)
 target_compile_definitions(cosmos_tests PRIVATE COSMOS_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-target_link_libraries(cosmos_tests PRIVATE cosmos_core)
+target_link_libraries(cosmos_tests PRIVATE cosmos_app cosmos_core)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(cosmos_tests PRIVATE -Wall -Wextra)
 endif()
 add_test(NAME cosmos_tests COMMAND cosmos_tests)
 
-# App: src/*.cpp plus the app/render/ui modules (plan section 4.1)
+# App executable: src/*.cpp plus the render/ui modules (plan section 4.1). GL lives here only.
 file(GLOB AWL_APP_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/*.cpp
-    ${CMAKE_SOURCE_DIR}/src/app/*.cpp
     ${CMAKE_SOURCE_DIR}/src/render/*.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/*.cpp)
 add_executable(AWL_Cosmos ${AWL_APP_SOURCES})
@@ -77,7 +84,7 @@ endforeach()
 add_custom_target(copy_shaders ALL DEPENDS ${SHADER_OUTPUTS})
 add_dependencies(AWL_Cosmos copy_shaders)
 
-target_link_libraries(AWL_Cosmos PRIVATE cosmos_core glad glfw OpenGL::GL)
+target_link_libraries(AWL_Cosmos PRIVATE cosmos_app cosmos_core glad glfw OpenGL::GL)
 
 # Build and run from the exe's folder so shaders/ resolves:  cmake --build build --target run
 add_custom_target(run
