@@ -12,6 +12,7 @@ using namespace cosmos;
 
 // Plan section 14: Sun-Jupiter-Saturn, coplanar, real mu, approximate J2000 elements. The Great Inequality is the
 // 5:2 near-resonance, 2 n_J - 5 n_S = -0.0071 rad/yr, period 2 pi / 0.0071 = 884 yr. It shows up as a slow oscillation
+// (initial conditions: J2000 table elements placed in Jacobi coordinates, with osculating a corrected once, see below)
 // of Jupiter's osculating semi-major axis (on top of the 12 yr, 20 yr and 63 yr terms).
 
 namespace {
@@ -31,7 +32,29 @@ struct Planet {
 const Planet JUPITER = {5.20288700, 0.04838624, 14.72847983, 34.39644051, 3034.9056606};
 const Planet SATURN = {9.53667594, 0.05386179, 92.59887831, 49.95424423, 1222.1138488};
 
-// Barycentric system. The Sun is placed from momentum balance; the planets get the two-body state for mu = mu_sun + mu_planet.
+// Osculating semi-major axes of the start state (AU), used instead of the table's mean a.
+// Why they differ: the table gives MEAN elements, a fit to positions over 1800-2050 with the short-period terms of the
+// planets' mutual perturbations averaged out. A state vector needs OSCULATING elements, which differ from the mean ones
+// by exactly those terms. The mean motion of the integrated orbit is not the Kepler value of the osculating a either. The
+// 2:5 resonance makes this matter: 2 n_J - 5 n_S is 0.0071 rad/yr, a difference of rates of 0.53 and 0.21 rad/yr, so a 4e-4
+// relative error in n_J (which the raw table a gives, even in Jacobi coordinates) moves the Great Inequality period from
+// 937 yr to 1045 yr. There is no closed form short of a perturbation theory, so a was adjusted ONCE, offline: five
+// fixed-point rounds a *= (n_integrated / n_table)^(2/3) on 1500-yr runs (epsilon 1e-9), starting from the table's a, until
+// the slope of the unwrapped osculating mean longitude equalled the tabulated rate L-dot to 1e-8. The first test case
+// below re-measures that (to 1e-4); it fails if the initial conditions or the integrator change the dynamics.
+// Result: Jupiter +2.8e-4 and Saturn -2.0e-4 relative to the table.
+const double A_JUPITER_OSC = 5.204304129;
+const double A_SATURN_OSC = 9.535462773;
+
+// Barycentric system from the table's elements, placed in Jacobi coordinates (the hierarchy Sun, Jupiter, Saturn):
+//   * Jupiter's elements are relative to the Sun, two-body mu = mu_sun + mu_jupiter;
+//   * Saturn's elements are relative to the barycentre of Sun + Jupiter, two-body mu = mu_sun + mu_jupiter + mu_saturn.
+// The tabulated elements are mean elements: the mean motion they imply is the one a planet has when it orbits the whole mass
+// inside its orbit. Heliocentric two-body placement of Saturn is wrong at the percent level, because the Sun itself
+// swings around the Sun-Jupiter barycentre at 12.5 m/s (1.3e-3 of Saturn's 9.7 km/s) and the heliocentric velocity of
+// Saturn inherits that swing, which changes the osculating a and n of Saturn by ~0.3 % and 2 n_J - 5 n_S, a difference of
+// two nearly equal rates (-0.0071 rad/yr against 0.53 rad/yr, i.e. 1.3 %), by tens of percent. Jacobi coordinates remove that
+// error; what remains (4e-4 in n_J, 2.5e-4 in n_S) is the mean-versus-osculating difference described at A_JUPITER_OSC.
 Bodies makeSystem(double aJupiterAU, double aSaturnAU)
 {
     Elements ej;
@@ -45,18 +68,23 @@ Bodies makeSystem(double aJupiterAU, double aSaturnAU)
     es.omega = SATURN.varpi * DEG;
     es.M = (SATURN.L - SATURN.varpi) * DEG;
     const RelState rj = elementsToState(ej, MU_SUN + MU_JUPITER);
-    const RelState rs = elementsToState(es, MU_SUN + MU_SATURN);
+    const RelState rs = elementsToState(es, MU_SUN + MU_JUPITER + MU_SATURN);
 
+    // positions and velocities with the Sun at the origin
+    const double m01 = MU_SUN + MU_JUPITER;
+    const Vec3 c01 = (MU_JUPITER / m01) * rj.r; // barycentre of Sun + Jupiter
+    const Vec3 u01 = (MU_JUPITER / m01) * rj.v;
     BodyDesc sun, jup, sat;
     sun.mu = MU_SUN;
     jup.mu = MU_JUPITER;
     jup.position = rj.r;
     jup.velocity = rj.v;
     sat.mu = MU_SATURN;
-    sat.position = rs.r;
-    sat.velocity = rs.v;
+    sat.position = c01 + rs.r;
+    sat.velocity = u01 + rs.v;
 
-    const double mt = MU_SUN + MU_JUPITER + MU_SATURN;
+    // move to the total barycentre
+    const double mt = m01 + MU_SATURN;
     const Vec3 cm = (MU_JUPITER * jup.position + MU_SATURN * sat.position) / mt;
     const Vec3 cv = (MU_JUPITER * jup.velocity + MU_SATURN * sat.velocity) / mt;
     sun.position = Vec3{} - cm;
@@ -72,6 +100,7 @@ Bodies makeSystem(double aJupiterAU, double aSaturnAU)
     b.add(sat);
     return b;
 }
+
 
 double totalEnergy(const Bodies& b)
 {
@@ -200,61 +229,56 @@ double dominantPeriod(const std::vector<double>& y, double pMin, double pMax, do
     return pMin + 0.5 * (static_cast<double>(best) + 0.5 * (y0 - y2) / (y0 - 2.0 * y1 + y2));
 }
 
-// The tabulated a are mean elements. Used as osculating a they make Saturn run 0.7 % too fast (Jupiter's pull changes the
-// mean motion relative to Kepler's law for the osculating a), which doubles 2 n_J - 5 n_S and halves the Great Inequality
-// period (measured 430 yr instead of 884). So the osculating a of both planets are adjusted, three fixed-point rounds of
-// 1500-yr runs, until the integrated mean longitudes advance at the tabulated rates L-dot (measured results 5.2042 and
-// 9.5821 AU).
-void calibratedSemiMajorAxes(double& aJ, double& aS)
-{
-    static double cachedJ = 0.0, cachedS = 0.0;
-    if (cachedJ == 0.0) {
-        cachedJ = JUPITER.a;
-        cachedS = SATURN.a;
-        const double nJ = JUPITER.Ldot * DEG / 100.0, nS = SATURN.Ldot * DEG / 100.0; // rad per year
-        for (int iter = 0; iter < 3; ++iter) {
-            Bodies b = makeSystem(cachedJ, cachedS);
-            const Series s = runSystem(b, 1e-9, 1500);
-            cachedJ *= std::pow(slope(s.lambdaJ) / nJ, 2.0 / 3.0);
-            cachedS *= std::pow(slope(s.lambdaS) / nS, 2.0 / 3.0);
-        }
-    }
-    aJ = cachedJ;
-    aS = cachedS;
-}
 }
 
 TEST_SUITE("ias15 adaptive: Sun-Jupiter-Saturn")
 {
-    TEST_CASE("Great Inequality: Jupiter's osculating a oscillates with a period of 880-940 yr; a tighter epsilon agrees to 0.1%")
+    TEST_CASE("the osculating a of the start state reproduce the tabulated mean motions (this is what the constants are for)")
     {
-        double aJ, aS;
-        calibratedSemiMajorAxes(aJ, aS);
+        // 1500 yr is long enough (125 Jupiter orbits, 50 Saturn orbits) for the slope of the unwrapped osculating mean
+        // longitude to be the mean motion to ~1e-5. Measured: n_J / n_table = 0.9999976 and n_S / n_table = 1.0000149.
+        // With the raw table a (in Jacobi coordinates) the same run gives 1.00042 and 0.99975, and that error alone moves
+        // the period of the Great Inequality from 937 yr to 1045 yr.
+        Bodies b = makeSystem(A_JUPITER_OSC, A_SATURN_OSC);
+        const Series s = runSystem(b, 1e-9, 1500);
+        const double nJ = JUPITER.Ldot * DEG / 100.0, nS = SATURN.Ldot * DEG / 100.0; // rad per year
+        CHECK(std::abs(slope(s.lambdaJ) / nJ - 1.0) < 1e-4);
+        CHECK(std::abs(slope(s.lambdaS) / nS - 1.0) < 1e-4);
+        // and the correction is small: the osculating a differ from the table's mean a by a few 1e-4 (relative)
+        CHECK(std::abs(A_JUPITER_OSC / JUPITER.a - 1.0) < 5e-4);
+        CHECK(std::abs(A_SATURN_OSC / SATURN.a - 1.0) < 5e-4);
+    }
 
-        Bodies b1 = makeSystem(aJ, aS);
+    TEST_CASE("Great Inequality: Jupiter's osculating a oscillates with a period of 880-1000 yr; a tighter epsilon agrees to 0.1%")
+    {
+        Bodies b1 = makeSystem(A_JUPITER_OSC, A_SATURN_OSC);
         const Series s1 = runSystem(b1, 1e-9, 6000);
-        Bodies b2 = makeSystem(aJ, aS);
+        Bodies b2 = makeSystem(A_JUPITER_OSC, A_SATURN_OSC);
         const Series s2 = runSystem(b2, 1e-11, 6000);
 
         double amp1 = 0.0, amp2 = 0.0;
         const double p1 = dominantPeriod(s1.aJupiter, 500.0, 1500.0, &amp1);
         const double p2 = dominantPeriod(s2.aJupiter, 500.0, 1500.0, &amp2);
 
-        // the resonance angle 2 lambda_J - 5 lambda_S circulates once per 884 yr. Jupiter's a oscillates a few percent slower
-        // (measured 937.7 yr): the perihelion longitudes, which precess, enter the full resonant argument (5 L_S - 2 L_J - 3 varpi).
+        // The resonance angle 2 lambda_J - 5 lambda_S circulates once per 2 pi / |2 n_J - 5 n_S| = 883 yr (from the table's
+        // rates). Jupiter's a oscillates a few percent slower: the perihelion longitudes, which precess, enter the full
+        // resonant argument, which is of third order in the eccentricities (2 L_J - 5 L_S + 3 varpi combinations).
         std::vector<double> phi(s1.lambdaJ.size());
         for (std::size_t k = 0; k < phi.size(); ++k) phi[k] = 2.0 * s1.lambdaJ[k] - 5.0 * s1.lambdaS[k];
         const double pPhi = TWO_PI / std::abs(slope(phi));
 
-        // Measured: calibrated osculating a = 5.2042 AU (Jupiter), 9.5821 AU (Saturn); period 937.66 yr at both epsilon
-        // 1e-9 (29410 steps) and 1e-11 (53516 steps), amplitude 2.2e-4 AU; resonance angle period 882.1 yr;
-        // energy error 3.6e-15 and 4.1e-15 over 6000 yr.
+        // Measured: period 937.4 yr at both epsilon 1e-9 (29446 steps) and 1e-11 (53564 steps), amplitude 2.29e-4 AU,
+        // resonance angle period 881.0 yr, energy error 2.7e-15 and 1.7e-15 over 6000 yr. The windows are the physical
+        // expectation (about 880-940 yr, which is 884 yr plus the precession of the perihelia) with 6 % of margin around
+        // the measurement, so a change of summation order or of libm cannot flip them; the real regression guards are
+        // the epsilon agreement (0.1 %) and the energy.
         CHECK(p1 > 880.0);
-        CHECK(p1 < 940.0);
+        CHECK(p1 < 1000.0);
+        CHECK(p1 > pPhi); // slower than the pure resonance angle
         CHECK(std::abs(p1 - p2) < 0.001 * p1);
         CHECK(std::abs(amp1 - amp2) < 0.01 * amp1);
-        CHECK(pPhi > 870.0); // the resonance angle 2 L_J - 5 L_S turns once per 884 yr, as 2 n_J - 5 n_S = -0.0071 rad/yr says
-        CHECK(pPhi < 895.0);
+        CHECK(pPhi > 860.0); // 2 n_J - 5 n_S = -0.0071 rad/yr says 883 yr
+        CHECK(pPhi < 905.0);
         CHECK(amp1 > 1e-4); // a real oscillation, not noise: a few 1e-4 AU
         CHECK(s1.maxEnergyError < 1e-13);
         CHECK(s2.maxEnergyError < 1e-13);

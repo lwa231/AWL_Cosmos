@@ -222,6 +222,7 @@ void IAS15::ensureSize(std::size_t n)
     bPrev_.assign(7 * K, 0.0);
     node_.x.assign(n, 0.0); node_.y.assign(n, 0.0); node_.z.assign(n, 0.0);
     node_.vx.assign(n, 0.0); node_.vy.assign(n, 0.0); node_.vz.assign(n, 0.0);
+    posScale_.assign(n, 0.0); accMag_.assign(n, 0.0);
 }
 
 // First step: 1% of the shortest dynamical time. For each body i with its nearest neighbour j at distance r, the
@@ -258,11 +259,12 @@ double IAS15::initialStep(const BodyState& s) const
 }
 
 // Target precision for this step: params.epsilon, raised when the roundoff floor of the force (see IAS15Params) is higher.
-double IAS15::effectiveEpsilon(const BodyState& s) const
+double IAS15::effectiveEpsilon(const BodyState& s)
 {
-    if (!(params.noiseFactor > 0.0)) return params.epsilon;
+    if (!(params.noiseFactor > 0.0)) return params.epsilon; // paper behaviour: no pair loop, nothing to scan
     double amax = 0.0;
-    std::vector<double> an(n_), pos(n_);
+    std::vector<double>& an = accMag_; // member scratch (sized in ensureSize): no allocation per step
+    std::vector<double>& pos = posScale_;
     for (std::size_t i = 0; i < n_; ++i) {
         an[i] = std::sqrt((aCur_.ax[i] * aCur_.ax[i] + aCur_.ay[i] * aCur_.ay[i]) + aCur_.az[i] * aCur_.az[i]);
         pos[i] = std::max(std::abs(s.x[i]), std::max(std::abs(s.y[i]), std::abs(s.z[i])));
@@ -307,8 +309,9 @@ void IAS15::predict(const std::vector<double>& bSrc, double q, double off)
     }
 }
 
-bool IAS15::iterate(const ForceFn& force, double dt, int& iters, double& amax, double& rel)
+bool IAS15::iterate(const ForceFn& force, double dt, int& iters, double& amax, double& rel, bool& finite)
 {
+    finite = true;
     const std::size_t n = n_, K = 3 * n_;
     double a0max = 0.0;
     for (std::size_t k = 0; k < K; ++k) a0max = std::max(a0max, std::abs(a0_[k]));
@@ -335,6 +338,13 @@ bool IAS15::iterate(const ForceFn& force, double dt, int& iters, double& amax, d
             force(node_, fn_);
             ++forceCalls_;
             const double* Fc[3] = {fn_.ax.data(), fn_.ay.data(), fn_.az.data()};
+            // explicit finiteness test: std::max / comparisons swallow a NaN, so the running maxima below would not show it
+            for (std::size_t i = 0; i < n; ++i) {
+                if (!(std::isfinite(Fc[0][i]) && std::isfinite(Fc[1][i]) && std::isfinite(Fc[2][i]))) {
+                    finite = false;
+                    return false; // the polynomial is garbage now; the caller rejects the attempt
+                }
+            }
             for (std::size_t i = 0; i < n; ++i) {
                 for (std::size_t c = 0; c < 3; ++c) {
                     const std::size_t k = 3 * i + c;
@@ -363,6 +373,7 @@ bool IAS15::iterate(const ForceFn& force, double dt, int& iters, double& amax, d
 double IAS15::step(BodyState& s, const ForceFn& force, double& t, double tMax)
 {
     lastRejections_ = 0;
+    lastFailed_ = false;
     const std::size_t n = s.x.size();
     if (n == 0 || !(t < tMax)) return 0.0;
     if (n != n_) ensureSize(n);
@@ -379,6 +390,14 @@ double IAS15::step(BodyState& s, const ForceFn& force, double& t, double tMax)
         x0_[3 * i] = s.x[i];  x0_[3 * i + 1] = s.y[i];  x0_[3 * i + 2] = s.z[i];
         v0_[3 * i] = s.vx[i]; v0_[3 * i + 1] = s.vy[i]; v0_[3 * i + 2] = s.vz[i];
         a0_[3 * i] = aCur_.ax[i]; a0_[3 * i + 1] = aCur_.ay[i]; a0_[3 * i + 2] = aCur_.az[i];
+    }
+    // A start state or acceleration that is not finite (coincident bodies, a NaN already in s) cannot be cured by a
+    // shorter step: refuse to advance and leave everything as it was.
+    for (std::size_t k = 0; k < K; ++k) {
+        if (!(std::isfinite(x0_[k]) && std::isfinite(v0_[k]) && std::isfinite(a0_[k]))) {
+            lastFailed_ = true;
+            return 0.0;
+        }
     }
 
     double dtTry = dtNext_;
@@ -429,13 +448,24 @@ double IAS15::step(BodyState& s, const ForceFn& force, double& t, double tMax)
         }
 
         double amax = 0.0, rel = 0.0;
-        converged = iterate(force, dt, iters, amax, rel);
+        bool finite = true;
+        converged = iterate(force, dt, iters, amax, rel, finite);
         lastRelAttempt = rel;
         totalIterations_ += iters;
 
+        // Finiteness is tracked explicitly: std::max(running, NaN) returns the running value, so the maxima alone would
+        // never show a NaN. Every coefficient is tested, not just b6, because the step is built from all of them.
         double b6max = 0.0;
-        for (std::size_t k = 0; k < K; ++k) b6max = std::max(b6max, std::abs(bt_[7 * k + 6]));
-        const bool finite = std::isfinite(b6max) && std::isfinite(amax);
+        if (finite && std::isfinite(amax) && std::isfinite(rel)) {
+            for (std::size_t j = 0; j < 7 * K; ++j) {
+                if (!std::isfinite(bt_[j])) { finite = false; break; }
+            }
+            if (finite) {
+                for (std::size_t k = 0; k < K; ++k) b6max = std::max(b6max, std::abs(bt_[7 * k + 6]));
+            }
+        } else {
+            finite = false;
+        }
         lastErrAttempt = (finite && amax > 0.0) ? b6max / amax : 0.0;
         if (!finite) ratio = 0.0;
         else if (b6max == 0.0 || amax == 0.0) ratio = INF;
@@ -459,6 +489,13 @@ double IAS15::step(BodyState& s, const ForceFn& force, double& t, double tMax)
                 dtTry = std::max(dt * params.safety, params.dtMin);
             }
             continue;
+        }
+        if (!finite) {
+            // out of retries and still not finite: do not commit anything (s, t, history and dense output stay as they
+            // were); the next call starts from a shorter step
+            lastFailed_ = true;
+            dtNext_ = std::max(dt * params.safety, params.dtMin);
+            return 0.0;
         }
         break;
     }

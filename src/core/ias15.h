@@ -102,6 +102,12 @@ public:
     // summed with Kahan compensation (the carry is kept here and used as long as t is the value returned by the
     // previous call). Rejected attempts happen inside this call (see lastRejections()); s only ever holds accepted
     // states. A new first step costs a few extra iterations.
+    // Non-finite numbers are never committed. If the state or its accelerations at the start are not finite (for
+    // example two coincident bodies, or a state that is already NaN) nothing is attempted. If a trial step produces a
+    // non-finite force or polynomial, it is rejected and retried with a quarter of the step (a force that is NaN only
+    // for the larger step is thereby cured); if the retries run out (60 attempts, dtMin, or a step too small to move
+    // t) the step is abandoned. In both cases step() returns 0, leaves s, t and the integrator's history and dense
+    // output untouched, and lastFailed() is true. Calling step() again tries a shorter step (see nextDt()).
     // force is called with node states of s's size. If the number of bodies changed since the last call, the history
     // is dropped as by reset().
     double step(BodyState& s, const ForceFn& force, double& t,
@@ -119,6 +125,10 @@ public:
     double lastResidual() const { return lastResidual_; }        // max|change of b6| / max|a| in the last iteration of the last accepted attempt
     int lastIterations() const { return lastIterations_; }      // predictor-corrector iterations of the last accepted attempt
     int lastRejections() const { return lastRejections_; }      // attempts rejected during the last step() call
+    // true if the last step() call could not produce a finite step and returned 0 without advancing (see step()). It is
+    // reset at the start of every step() call: false after a successful step and after a call that did nothing because
+    // t >= tMax or s was empty. Check it (or the returned 0) before looping on step() again.
+    bool lastFailed() const { return lastFailed_; }
     long totalSteps() const { return totalSteps_; }
     long totalRejections() const { return totalRejections_; }
     long totalIterations() const { return totalIterations_; }
@@ -150,10 +160,11 @@ private:
     // Fill bt_ (the b of the trial step) by evaluating the polynomial bSrc, which belongs to a step of length srcDt,
     // at tau_old = off + q * h[k] (q = dt / srcDt; off = 1 continues after the step, off = 0 restarts the same step).
     void predict(const std::vector<double>& bSrc, double q, double off);
-    // Gauss-Seidel iterations on the trial step; returns false if the iteration cap was hit above the floor.
-    bool iterate(const ForceFn& force, double dt, int& iters, double& amax, double& rel);
+    // Gauss-Seidel iterations on the trial step; returns false if the iteration cap was hit above the floor. finite is
+    // set to false (and the iteration abandoned) as soon as a node acceleration is not finite.
+    bool iterate(const ForceFn& force, double dt, int& iters, double& amax, double& rel, bool& finite);
     double initialStep(const BodyState& s) const;
-    double effectiveEpsilon(const BodyState& s) const;
+    double effectiveEpsilon(const BodyState& s);
     void ensureSize(std::size_t n);
 
     std::size_t n_ = 0;                 // bodies
@@ -176,6 +187,7 @@ private:
     std::vector<double> bt_, gt_, bf_;  // bt_: 7 per component, gt_: 8 per component, bf_: copy of a failed attempt's b
     BodyState node_;
     Accel fn_;
+    std::vector<double> posScale_, accMag_; // scratch of effectiveEpsilon(), one entry per body
 
     double dtNext_ = 0.0;
     double tCarry_ = 0.0, tExpected_ = std::numeric_limits<double>::quiet_NaN();
@@ -185,6 +197,7 @@ private:
     int lastIterations_ = 0, lastRejections_ = 0;
     long totalSteps_ = 0, totalRejections_ = 0, totalIterations_ = 0, forceCalls_ = 0;
     bool lastConverged_ = true;
+    bool lastFailed_ = false;
 };
 
 } // namespace cosmos
