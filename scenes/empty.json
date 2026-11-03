@@ -1,0 +1,8 @@
+{
+  "name": "Empty sandbox",
+  "units": "SI",
+  "epoch_s": 0.0,
+  "bodies": [],
+  "shuttles": [],
+  "settings": { "infiniteFuel": false, "controllerTick_s": 0.1 }
+}
