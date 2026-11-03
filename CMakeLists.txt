@@ -17,17 +17,9 @@ add_library(glad STATIC external/glad/src/glad.c)
 target_include_directories(glad PUBLIC external/glad/include)
 
 # cosmos_core: physics library. No OpenGL/GLFW here, so it can run headless (tests).
-add_library(cosmos_core STATIC
-    src/core/Version.cpp
-    src/core/bodies.cpp
-    src/core/gravity.cpp
-    src/core/integrators.cpp
-    src/core/ias15.cpp
-    src/core/diagnostics.cpp
-    src/core/kepler.cpp
-    src/core/placement.cpp
-    src/core/hierarchy.cpp
-)
+# Every .cpp in src/core is part of the library (CONFIGURE_DEPENDS picks up new files on the next build)
+file(GLOB COSMOS_CORE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/core/*.cpp)
+add_library(cosmos_core STATIC ${COSMOS_CORE_SOURCES})
 target_include_directories(cosmos_core PUBLIC src)
 # PUBLIC so header-inline math in every consumer is compiled with the same float rules (determinism)
 target_compile_options(cosmos_core PUBLIC -ffp-contract=off)
@@ -37,22 +29,8 @@ endif()
 
 # Headless tests: link only against core (no window, no GPU)
 enable_testing()
-add_executable(cosmos_tests
-    tests/test_main.cpp
-    tests/test_constants.cpp
-    tests/test_vec3.cpp
-    tests/test_bodies.cpp
-    tests/test_gravity.cpp
-    tests/test_kdk.cpp
-    tests/test_yoshida.cpp
-    tests/test_ias15.cpp
-    tests/test_diagnostics.cpp
-    tests/test_kepler.cpp
-    tests/test_kepler_roundtrip.cpp
-    tests/test_radii.cpp
-    tests/test_placement.cpp
-    tests/test_hierarchy.cpp
-)
+file(GLOB COSMOS_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/*.cpp)
+add_executable(cosmos_tests ${COSMOS_TEST_SOURCES})
 target_include_directories(cosmos_tests PRIVATE external/doctest)
 target_link_libraries(cosmos_tests PRIVATE cosmos_core)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -60,12 +38,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 add_test(NAME cosmos_tests COMMAND cosmos_tests)
 
-add_executable(AWL_Cosmos
-    src/main.cpp
-    src/Shader.cpp
-    src/GraphicsObData.cpp
-    src/SimulationLogic.cpp
-)
+# App: src/*.cpp plus the app/render/ui modules (plan section 4.1)
+file(GLOB AWL_APP_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_SOURCE_DIR}/src/*.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/*.cpp
+    ${CMAKE_SOURCE_DIR}/src/render/*.cpp
+    ${CMAKE_SOURCE_DIR}/src/ui/*.cpp)
+add_executable(AWL_Cosmos ${AWL_APP_SOURCES})
 target_include_directories(AWL_Cosmos PRIVATE src)
 
 # Warnings for our own code only (not the bundled GLAD)
