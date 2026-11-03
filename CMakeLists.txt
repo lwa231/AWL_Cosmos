@@ -22,6 +22,7 @@ add_library(cosmos_core STATIC
     src/core/bodies.cpp
     src/core/gravity.cpp
     src/core/integrators.cpp
+    src/core/ias15.cpp
     src/core/diagnostics.cpp
     src/core/kepler.cpp
     src/core/placement.cpp
@@ -43,6 +44,8 @@ add_executable(cosmos_tests
     tests/test_bodies.cpp
     tests/test_gravity.cpp
     tests/test_kdk.cpp
+    tests/test_yoshida.cpp
+    tests/test_ias15.cpp
     tests/test_diagnostics.cpp
     tests/test_kepler.cpp
     tests/test_kepler_roundtrip.cpp
