@@ -25,7 +25,7 @@ std::vector<PresetInfo>& table()
     static std::vector<PresetInfo> t = {
         {"empty", "Empty sandbox", "Nothing in it. Every body you add is named <Kind> <n>.", "", &emptyScene},
         {"lucerna", "Lucerna", "The default template: a KSP-scale system with fictional densities.", "lucerna.json", nullptr},
-        // M8: {"solar_system", "Real solar system", "Sun, planets, Moon and Pluto from JPL Horizons.", "solar_system.json", nullptr},
+        {"solar_system", "Real solar system", "Sun, the eight planets, the Moon and Pluto from JPL Horizons (J2000).", "solar_system.json", nullptr},
     };
     return t;
 }
