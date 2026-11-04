@@ -14,7 +14,7 @@ A real-time space simulation and renderer built from scratch in C++ and OpenGL. 
 | CMake | 3.21+ | 4.4 used |
 | Ninja | 1.13 | Build backend |
 | GLFW | 3.x | Window and input |
-| OpenGL | 3.3 core | Needs a GPU and driver that support it |
+| OpenGL | 4.5 core | Needs a GPU and driver that support it |
 | GLAD | bundled | Included in `external/glad`, nothing to install |
 
 ## Setup

@@ -1,0 +1,81 @@
+#pragma once
+// Renderer interface (plan 9.1). Everything OpenGL hides behind it: core, app and ui never call GL.
+//
+// Per-frame use:
+//     renderer.beginFrame(frame);          // uploads the frame description, clears, binds
+//     renderer.drawLines(LinePass::Underlay);
+//     renderer.drawBodies();
+//     renderer.drawShuttles();
+//     renderer.drawLines(LinePass::Overlay);
+//     renderer.endFrame();                 // puts a fence behind this frame's streamed data
+//     (the caller swaps buffers)
+// `frame` must stay unchanged and alive until endFrame() returns.
+//
+// Coordinate/projection convention (documented here, used by every shader): the frame uniform buffer holds an
+// orthographic projection from CENTRE-ORIGIN PIXELS (x right, y up, camera at 0,0) to clip space, plus
+// metresPerPixel. Vertex shaders convert camera-relative metres to pixels first (metres / metresPerPixel) and then
+// apply the projection, so the large numbers of a 1e11 m scene never reach the projection matrix.
+#include "app/render_frame.h"
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace cosmos {
+namespace render {
+
+struct RendererConfig {
+    std::string shaderDir = "shaders";   // folder holding the .vert/.frag/.glsl files (next to the exe)
+    bool debugOutput = false;            // install glDebugMessageCallback (needs a GL debug context from the window)
+};
+
+// Per-frame counters, valid after endFrame() until the next beginFrame(). Used to verify draw-call counts.
+struct RenderStats {
+    std::uint32_t drawCalls = 0;           // all glDraw* calls of the frame
+    std::uint32_t bodyDrawCalls = 0;
+    std::uint32_t shuttleDrawCalls = 0;
+    std::uint32_t lineDrawCalls = 0;
+    std::uint32_t bodyInstances = 0;
+    std::uint32_t lightCount = 0;
+    std::uint32_t shuttleInstances = 0;
+    std::uint32_t lineSegments = 0;        // quads drawn (strips + loose segments), both passes
+    std::uint64_t streamedBytes = 0;       // bytes written into the persistent mapped buffer this frame
+};
+
+// Cumulative counters since init().
+struct RenderTotals {
+    std::uint64_t frames = 0;
+    std::uint64_t glErrors = 0;            // KHR_debug messages of type error / undefined behaviour
+    std::uint64_t glWarnings = 0;          // other non-notification KHR_debug messages
+    std::uint32_t fenceStalls = 0;         // frames that had to wait for the GPU before reusing a streaming segment
+    std::uint32_t arenaGrowths = 0;        // times the streaming buffer was reallocated bigger
+};
+
+enum class LinePass { Underlay, Overlay };
+
+class Renderer {
+public:
+    virtual ~Renderer() = default;
+
+    virtual bool init(const RendererConfig& config) = 0;   // needs a current GL 4.5 core context
+    virtual void shutdown() = 0;                            // frees every GL object; safe to call twice
+    virtual void resize(int widthPx, int heightPx) = 0;
+
+    virtual void beginFrame(const app::RenderFrame& frame) = 0;
+    virtual void drawBodies() = 0;                          // plan 9.4 step 6
+    virtual void drawShuttles() = 0;                        // plan 9.4 step 7 (hulls + flames, one draw call)
+    virtual void drawLines(LinePass pass) = 0;              // streamed line batch (underlay: step 4/5, overlay: step 9)
+    virtual void endFrame() = 0;
+
+    virtual const RenderStats& frameStats() const = 0;
+    virtual const RenderTotals& totals() const = 0;
+
+    // Developer aid: copy the back buffer (call after endFrame, before swapping) as tightly packed RGB, top row first.
+    virtual bool readBackBuffer(std::vector<std::uint8_t>& rgb, int& width, int& height) = 0;
+};
+
+// The OpenGL 4.5 core implementation.
+std::unique_ptr<Renderer> createGlRenderer();
+
+} // namespace render
+} // namespace cosmos
