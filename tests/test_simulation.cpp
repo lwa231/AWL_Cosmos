@@ -187,7 +187,11 @@ TEST_SUITE("simulation")
         const MergeResult m = sim.mergeLog()[0];
         CHECK(m.survivor == idA);   // the heavier one
         CHECK(m.absorbed == idB);
-        CHECK(sim.time() == m.t);
+        // The merge is made when the bodies really touch: at the end of a clipped step, or at the start of the next step (a
+        // step clipped at the chord's contact time can end short of a path that bends away from the chord). The call that
+        // merged may have taken that next step (dtMax 100 s) too.
+        CHECK(sim.time() >= m.t);
+        CHECK(sim.time() <= m.t + 100.0);
         CHECK(m.t > 5.0e4);
         CHECK(m.t < 1.5e5);
         CHECK(m.relSpeed > 1.0e4);

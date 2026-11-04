@@ -27,7 +27,18 @@ Hierarchy buildHierarchy(const std::vector<Vec3>& r, const std::vector<Vec3>& v,
 // d * cbrt(mu / (3 mu_sibling)); a heavier one inherits its parent's; the root is infinite.
 double hillRadius(const Hierarchy& h, int node);
 
-// The deepest node whose finite Hill sphere contains the point (ties: nearest barycentre); the root (system
+// A node whose finite Hill sphere contains a point, as a candidate parent.
+struct ParentCandidate {
+    double hill = 0.0;   // Hill radius of the node (inherited by a heavier child: equal radii are common)
+    bool leaf = false;   // a body, not a barycentre node
+    int depth = 0;       // levels below the root
+    double dist = 0.0;   // distance from the point to the node's barycentre
+};
+// Parent choice (plan 5.9, 15 item 2c): the smallest Hill sphere that contains the point; equal radii (a heavier child
+// inherits its parent's) go to a body over a barycentre node, then to the deeper node, then to the nearer one.
+bool betterParent(const ParentCandidate& a, const ParentCandidate& b);
+
+// The node with the smallest finite Hill sphere containing the point (ties: betterParent); the root (system
 // barycentre) if none. The dominant body's infinite sphere counts as the root.
 int shuttleParent(const Hierarchy& h, const Vec3& position);
 

@@ -47,13 +47,19 @@ constexpr std::size_t kShuttleTasks = 64;
 constexpr int kMaxBodyRedos = 8;
 // A contact this close to the end of the step (relative to its length) counts as at the end: no redo.
 constexpr double kEndContactFraction = 1e-9;
+// Consecutive body steps that neither advance time nor merge before advanceTo gives up.
+constexpr int kMaxStalledSteps = 8;
+// Two bodies whose centres are within (R_a + R_b)(1 + this) count as touching.
+constexpr double kTouchTolerance = 1e-9;
+
+Vec3 bodyPos(const Bodies& b, std::size_t i) { return {b.state.x[i], b.state.y[i], b.state.z[i]}; }
 
 // ---------------------------------------------------------------------------------------------------------------
 // Parent node of a shuttle (plan 5.9, 15 item 2c): the hierarchy of hierarchy.h, built once per body step from the
 // state at the start of the step, queried at any time inside the step.
 //
-// The nodes move while the step runs, so the Hill-sphere test of shuttleParent (same rule: deepest node whose finite
-// Hill sphere contains the shuttle, ties by distance, else the root) is evaluated against the nodes' positions at the
+// The nodes move while the step runs, so the Hill-sphere test of shuttleParent (same rule: smallest finite Hill sphere
+// that contains the shuttle, ties by betterParent, else the root) is evaluated against the nodes' positions at the
 // query time (start position + velocity * elapsed). The Hill radii and depths are computed once per build. The state
 // of the chosen node is exact: a body from the dense output, a barycentre from its children's.
 class HierarchyParents final : public IParentProvider {
@@ -89,8 +95,8 @@ public:
         if (h_.root < 0) return out;
         const double dt = t - t0_;
         int best = h_.root;
-        int bestDepth = 0;
-        double bestDist = std::numeric_limits<double>::infinity();
+        ParentCandidate bestC;
+        bool have = false;
         for (std::size_t i = 0; i < h_.nodes.size(); ++i) {
             if (static_cast<int>(i) == h_.root) continue;
             const double rh = hill_[i];
@@ -98,10 +104,11 @@ public:
             const HierarchyNode& n = h_.nodes[i];
             const double d = norm(position - (n.r + n.v * dt));
             if (d >= rh) continue;
-            if (depth_[i] > bestDepth || (depth_[i] == bestDepth && d < bestDist)) {
+            const ParentCandidate c{rh, n.childA < 0, depth_[i], d};
+            if (!have || betterParent(c, bestC)) {
                 best = static_cast<int>(i);
-                bestDepth = depth_[i];
-                bestDist = d;
+                bestC = c;
+                have = true;
             }
         }
         const HierarchyNode& n = h_.nodes[static_cast<std::size_t>(best)];
@@ -229,6 +236,13 @@ public:
                 (*h.contact.surface == *killer->contact.surface && h.body < killer->body))
                 killer = &h;
         }
+        // A FuelEmpty that the propagator pushed for this step just before calling the hook, later than the destruction,
+        // is dropped: the shuttle is gone by then.
+        if (killer && !events.empty()) {
+            const Event& last = events.back();
+            if (last.type == EventType::FuelEmpty && last.id == s.id && last.t > s.t0 + *killer->contact.surface)
+                events.pop_back();
+        }
         if (!hits.empty()) appendShuttleStepEvents(events, s.t0, s.id, hits);
 
         ShuttleSample from{s.t0, s.r0, s.v0};
@@ -291,11 +305,28 @@ Simulation::Simulation(const ResolvedScene& scene, const SceneSettings& settings
     for (const ResolvedShuttle& r : scene.shuttles) top = std::max<std::uint64_t>(top, r.desc.id);
     nextId_ = top + 1;
 
+    // The scene has no heading: a shuttle starts pointing along its velocity relative to its parent node (the same
+    // parent a controller sees), not along the absolute velocity, which for a shuttle about a moving planet is the
+    // planet's own motion.
+    Hierarchy startHierarchy;
+    if (!scene.shuttles.empty() && bodies_.size() > 0) {
+        std::vector<Vec3> r(bodies_.size()), v(bodies_.size());
+        for (std::size_t i = 0; i < bodies_.size(); ++i) {
+            r[i] = bodyPos(bodies_, i);
+            v[i] = {bodies_.state.vx[i], bodies_.state.vy[i], bodies_.state.vz[i]};
+        }
+        startHierarchy = buildHierarchy(r, v, bodies_.mu);
+    }
     for (const ResolvedShuttle& r : scene.shuttles) {
         ShuttleDesc d;
         if (!shuttleDescFromResolved(r, d)) {
             warnings_.push_back("shuttle '" + r.desc.name + "' skipped: unknown controller '" + r.desc.controller + "'");
             continue;
+        }
+        if (startHierarchy.root >= 0) {
+            const int parent = shuttleParent(startHierarchy, d.position);
+            const Vec3 rel = d.velocity - startHierarchy.nodes[static_cast<std::size_t>(parent)].v;
+            if (rel.x != 0.0 || rel.y != 0.0) d.heading = std::atan2(rel.y, rel.x);
         }
         if (d.id == 0 || bodies_.find(d.id) || shuttles_.find(d.id)) {
             const std::uint64_t fresh = allocateId();
@@ -341,6 +372,14 @@ bool Simulation::setController(ShuttleId id, ControllerKind kind)
     return true;
 }
 
+void Simulation::setControllerTick(double period)
+{
+    if (!(period > 0.0) || !std::isfinite(period)) return;
+    controllerTick_ = period;
+    envDirty_ = true;
+    for (std::size_t i = 0; i < shuttles_.size(); ++i) shuttles_.nextTick[i] = kTickUnset;
+}
+
 void Simulation::setThreadCount(int threads) { pool_.resize(threads); }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -355,8 +394,22 @@ bool Simulation::advanceTo(double tTarget)
         if (tTarget > t_) t_ = tTarget;
         return true;
     }
+    int stalled = 0;
     while (t_ < tTarget) {
+        const double tBefore = t_;
+        const std::size_t countBefore = bodies_.size();
         if (!stepBodies()) return false;
+        // Every body step moves the clock or merges a pair. If neither happens repeatedly something is wrong in the contact
+        // logic: stop with an error instead of spinning forever.
+        if (t_ == tBefore && bodies_.size() == countBefore) {
+            if (++stalled >= kMaxStalledSteps) {
+                failed_ = true;
+                warnings_.push_back("body step made no progress (no time advance, no merge)");
+                return false;
+            }
+        } else {
+            stalled = 0;
+        }
     }
     if (!std::is_sorted(events_.events().begin(), events_.events().end(), eventBefore)) events_.sort();
     return true;
@@ -398,17 +451,22 @@ bool Simulation::stepBodies()
 
     // 2. Swept body-body test with the chord from the start state to the end state (plan 5.11).
     std::vector<BodyContact> contacts = findBodyContacts(bodies_, work_, t - t0);
-    std::optional<std::pair<BodyId, BodyId>> forced; // the pair that clipped the step: merged at its end whatever the retest says
+    std::optional<std::pair<BodyId, BodyId>> forced; // the pair that clipped the step: merged at its end if it really touches
+    // A contact within this many seconds of the step start counts as touching at the start: a clipped step that short
+    // would not move the clock (4 ulp of t0), so the pair is merged instead of stepped to.
+    const double touchEps = 4.0 * (std::nextafter(std::fabs(t0), INFINITY) - std::fabs(t0));
     for (int redo = 0; redo < kMaxBodyRedos && !contacts.empty() && contacts.front().t < (t - t0) * (1.0 - kEndContactFraction);
          ++redo) {
         const BodyContact first = contacts.front();
         const double tc = t0 + first.t;
-        if (!(tc > t0 + 4.0 * (std::nextafter(std::fabs(t0), INFINITY) - std::fabs(t0)))) {
-            // Touching (or overlapping) at the start already: merge now without taking a step.
+        if (first.t <= touchEps || !(tc > t0)) {
+            // Touching (or overlapping) at the start already: merge now without taking a step. The test and the merge
+            // loop use the same threshold and the first pair is always merged, so time or the body count always changes.
             ias_ = backup_;
+            if (!mergePair(first.a, first.b, t0)) return fail("body merge failed for a pair touching at the start of a step");
             for (const BodyContact& c : contacts) {
-                if (c.t > 0.0) break;
-                mergePair(c.a, c.b, t0);
+                if (c.t > touchEps) break;
+                mergePair(c.a, c.b, t0); // a pair of an already merged body no longer resolves
             }
             return true;
         }
@@ -435,9 +493,20 @@ bool Simulation::stepBodies()
     // 4. Commit the bodies and merge the pairs that touch at the end of the step.
     bodies_.state = work_;
     t_ = t;
-    if (forced) mergePair(forced->first, forced->second, t_);
+    // The pair that clipped the step is merged if it touches at the clipped end (the chord test can fire on chord sag
+    // alone, for a near-grazing orbit that never touches; then the short step just ends and the next one tests again).
+    // A pair that the retest still lists is merged by the loop below.
+    if (forced && touchingNow(forced->first, forced->second)) mergePair(forced->first, forced->second, t_);
     for (const BodyContact& c : contacts) mergePair(c.a, c.b, t_); // a pair already merged above no longer resolves
     return true;
+}
+
+bool Simulation::touchingNow(BodyId a, BodyId b) const
+{
+    const std::optional<std::size_t> ia = bodies_.find(a), ib = bodies_.find(b);
+    if (!ia || !ib) return false;
+    const double R = bodies_.radius[*ia] + bodies_.radius[*ib];
+    return norm(bodyPos(bodies_, *ia) - bodyPos(bodies_, *ib)) <= R * (1.0 + kTouchTolerance);
 }
 
 void Simulation::prepareEnvironment()

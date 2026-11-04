@@ -69,6 +69,13 @@ ShuttleCommand BurnController::update(const ShuttleObservation& obs, Rng&)
     const double authority = obs.inertia > 0.0 ? obs.maxTorque / obs.inertia : 0.0;
     const Vec3& v = obs.relVelocity;
     ShuttleCommand cmd;
+    if (!obs.infiniteFuel && !(obs.fuelMass > 0.0)) {
+        // Tank empty: pointing is pointless. Keep asking for thrust (the propagator forces it to 0 and reports FuelEmpty once,
+        // plan 5.7), stop the spin, and then rest (nextTick).
+        cmd.throttle = 1.0;
+        cmd.turn = std::fabs(obs.spin) < kRestSpin ? 0.0 : pointingTurn(obs.heading, obs.heading, obs.spin, authority);
+        return cmd;
+    }
     if (!(norm2(v) > 0.0)) {
         // No relative motion: no direction to point at; just stop spinning.
         cmd.turn = pointingTurn(obs.heading, obs.heading, obs.spin, authority);
@@ -79,6 +86,12 @@ ShuttleCommand BurnController::update(const ShuttleObservation& obs, Rng&)
     const double err = std::fabs(wrapAngle(target - obs.heading));
     cmd.throttle = err < kBurnAlignmentLimit ? 1.0 : 0.0;
     return cmd;
+}
+
+std::int64_t BurnController::nextTick(const ShuttleObservation& obs) const
+{
+    if (!obs.infiniteFuel && !(obs.fuelMass > 0.0) && std::fabs(obs.spin) < kRestSpin) return std::numeric_limits<std::int64_t>::max();
+    return obs.tick + 1;
 }
 
 ShuttleCommand WanderController::commandFor(std::uint64_t shuttleId, std::int64_t tick) const

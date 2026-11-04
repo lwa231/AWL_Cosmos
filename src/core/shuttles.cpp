@@ -194,6 +194,8 @@ ShuttleEnvironment::ShuttleEnvironment(const Bodies& b, const IBodyEphemeris& e,
 namespace {
 
 constexpr std::size_t kNone = static_cast<std::size_t>(-1);
+// Step cap at the fuel-out time is this fraction beyond it (rounding of the step end must not leave a sliver of fuel).
+constexpr double kFuelOutMargin = 1e-9;
 
 // Shuttle state during a propagation; trial steps work on a copy.
 struct Dyn {
@@ -280,8 +282,12 @@ double dynamicalTime(const Dominant& dom, const Bodies& b)
 
 // Step limit from the atmospheres (plan 5.6: drag is a split operator, so the step must resolve the density profile).
 // Inside the reach (radius + top) of a body with an atmosphere the step is limited to min(activeTime, resolution * H / |v_rel|),
-// that is a fraction of a scale height of travel. Outside, the step may be as long as the time to reach the atmosphere
-// (but not shorter than the inside limit), so a fast shuttle cannot jump across the layer in one step. infinity = no limit.
+// that is a fraction of a scale height of travel. Outside, the step may be as long as the time it takes to close the gap to
+// the layer (but not shorter than the inside limit), so a fast shuttle cannot jump across the layer in one step. The gap
+// closes with the radial closing speed vr (zero when moving away or along the surface) under the pull at the layer top,
+// g = mu / reach^2, the strongest on the way: gap = vr t + g t^2 / 2. That is a lower bound of the real time for a body
+// pulling radially (the centrifugal term only slows an orbit's fall), so a circular orbit just above the top is not cut to
+// the dive rate while a fall into the layer still cannot jump it. infinity = no limit.
 double atmosphereStepCap(const ShuttleEnvironment& env, double activeTime, double t, const Vec3& r, const Vec3& v)
 {
     const double inf = std::numeric_limits<double>::infinity();
@@ -291,13 +297,24 @@ double atmosphereStepCap(const ShuttleEnvironment& env, double activeTime, doubl
         const double top = env.atmosphereTop[j];
         if (!(top > 0.0)) continue;
         const Vec3 pos = env.ephemeris.position(j, t);
-        const double dist = norm(r - pos);
+        const Vec3 rel = r - pos;
+        const double dist = norm(rel);
         const double reach = b.radius[j] + top;
-        const double vrel = std::max(norm(v - env.ephemeris.velocity(j, t)), 1.0);
+        const Vec3 vRel = v - env.ephemeris.velocity(j, t);
+        const double vrel = std::max(norm(vRel), 1.0);
         double inside = activeTime;
         if (env.atmosphereResolution > 0.0) inside = std::min(inside, env.atmosphereResolution * b.atmosphere[j]->scaleHeight / vrel);
-        if (dist < reach) cap = std::min(cap, inside);
-        else cap = std::min(cap, std::max((dist - reach) / vrel, inside));
+        if (dist < reach) {
+            cap = std::min(cap, inside);
+        } else {
+            const double gap = dist - reach;
+            const double vr = dist > 0.0 ? std::max(-dot(rel, vRel) / dist, 0.0) : 0.0;
+            const double g = b.mu[j] / (reach * reach);   // the strongest pull on the way down to the layer
+            // Positive root of g t^2 / 2 + vr t - gap, in the cancellation-free form 2 gap / (vr + sqrt(vr^2 + 2 g gap))
+            const double disc = vr + std::sqrt(vr * vr + 2.0 * g * gap);
+            const double tReach = disc > 0.0 ? 2.0 * gap / disc : inf;
+            cap = std::min(cap, std::max(tReach, inside));
+        }
     }
     return cap;
 }
@@ -487,6 +504,13 @@ void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const Sh
             const double activeTime = env.activeStepFraction > 0.0 ? env.activeStepFraction * dynamicalTime(dom, B)
                                                                      : std::numeric_limits<double>::infinity();
             if (thrusting) cap = std::min(cap, activeTime);
+            if (thrusting && !c.infinite && c.ve > 0.0 && c.maxThrust > 0.0) {
+                // The step ends where the fuel runs out (a boundary like a tick), so the kick of the thrust operator, applied
+                // at the start of a half step, never carries an error of a * tau^2 / 2 for a burn that stops inside the step.
+                // The factor puts the end a hair past the empty point, so the tank is exactly empty at the end of the step.
+                const double tEmpty = y.fuel * c.ve / (c.throttle * c.maxThrust);
+                cap = std::min(cap, tEmpty * (1.0 + kFuelOutMargin));
+            }
             if (std::isfinite(activeTime) || env.atmosphereResolution > 0.0)
                 cap = std::min(cap, atmosphereStepCap(env, activeTime, t, y.r, y.v));
         }

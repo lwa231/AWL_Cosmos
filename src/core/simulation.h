@@ -40,6 +40,10 @@ namespace cosmos {
 //   3. The per-thread events are merged and sorted by (t, id) (EventQueue::merge) into the queue.
 //   4. If the bodies touched, the pair is merged (5.4) with its events, the ledger records the loss, and IAS15 is reset
 //      (lazily, at the start of the next step, so the dense output of the step that ended in the merge stays readable).
+//      A step clipped to the chord's contact time can end short of the real contact (the true path bends away from the
+//      chord), so a pair is merged only when its centres are within the contact distance; otherwise the next step tests it
+//      again, and a pair already touching at the start of a step (within 4 ulp of the clock of touching) is merged
+//      without taking that step. The merge time is then the start of that step, and time() may be a step later.
 //
 // Determinism (4.6): the result (all body and shuttle doubles, the event list) is bit-identical for 1..16 threads and
 // for any sequence of advanceTo targets that ends on the same final target. Not thread safe: use one Simulation from
@@ -165,8 +169,10 @@ public:
     // Global infinite-fuel switch (plan 5.7).
     void setInfiniteFuel(bool on) { shuttles_.infiniteFuel = on; }
     bool infiniteFuel() const { return shuttles_.infiniteFuel; }
-    // Controller tick period, s (plan 4.6); only change it while stopped, it moves the tick grid.
-    void setControllerTick(double period) { controllerTick_ = period; envDirty_ = true; }
+    // Controller tick period, s (plan 4.6); only change it while stopped, it moves the tick grid. Every shuttle's
+    // controller is evaluated again at the start of its next step (the stored tick indices belong to the old grid).
+    // A period that is not positive and finite is ignored.
+    void setControllerTick(double period);
     double controllerTick() const { return controllerTick_; }
 
     // Add a shuttle at time() (id 0 = allocate a fresh one). Returns its ID, or 0 if the store rejected it.
@@ -179,6 +185,7 @@ private:
 
     bool stepBodies();
     bool mergePair(BodyId a, BodyId b, double t);
+    bool touchingNow(BodyId a, BodyId b) const;
     void advanceShuttles(double t0, double t1);
     void prepareEnvironment();
     void resizeShuttleArrays();

@@ -193,4 +193,41 @@ TEST_SUITE("hierarchy")
         const Vec3 deep = {-3.0e12, -3.0e12, 0};
         CHECK(shuttleParent(h, deep) == h.root);
     }
+
+    TEST_CASE("shuttle parent: the smallest Hill sphere wins, and a body wins over a barycentre of equal radius")
+    {
+        const Scene s = sceneFrom(lucerna_data::lucerna());
+        const Hierarchy h = buildHierarchy(s.r, s.v, s.mu);
+        const int n = static_cast<int>(s.mu.size());
+
+        // Gelu is deeper in the tree than Domus's barycentre but its sphere (2.3e6 m) is the smaller one; Domus inherits the
+        // 1.4e8 m sphere of the planet system, which also contains the point: the old rule (deepest node) took Domus
+        // for a shuttle 2.1e5 m from Gelu.
+        CHECK(hillRadius(h, Gelu) < 3.0e6);
+        CHECK(hillRadius(h, Domus) > 1.0e8);
+        for (double dist : {2.1e5, 6.0e5, 1.5e6}) {
+            const Vec3 p = s.r[Gelu] + Vec3{dist, 0.0, 0.0};
+            INFO("distance from Gelu " << dist);
+            CHECK(shuttleParent(h, p) == Gelu);
+        }
+        // Low orbits of the planet: the body, never the Domus + Custos barycentre (same radius, inherited)
+        for (double dist : {1.0e6, 2.0e6, 3.0e6}) {
+            const Vec3 p = s.r[Domus] + Vec3{0.0, dist, 0.0};
+            INFO("distance from Domus " << dist);
+            const int parent = shuttleParent(h, p);
+            CHECK(parent == Domus);
+            CHECK(parent < n);
+        }
+        // The same ordering on the comparison itself
+        const ParentCandidate small{1.0e6, false, 3, 5.0e5}, big{1.0e8, true, 9, 1.0e5};
+        CHECK(betterParent(small, big));
+        CHECK(!betterParent(big, small));
+        const ParentCandidate body{1.0e8, true, 4, 9.0e7}, bary{1.0e8, false, 5, 1.0e5};
+        CHECK(betterParent(body, bary));   // equal radius: the body, whatever the depth or distance
+        CHECK(!betterParent(bary, body));
+        const ParentCandidate deep{1.0e8, false, 6, 9.0e7}, shallow{1.0e8, false, 5, 1.0e5};
+        CHECK(betterParent(deep, shallow));   // then the deeper one
+        const ParentCandidate near{1.0e8, false, 5, 1.0e5}, far{1.0e8, false, 5, 2.0e5};
+        CHECK(betterParent(near, far));       // then the nearer one
+    }
 }

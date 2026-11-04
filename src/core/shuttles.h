@@ -77,7 +77,9 @@ struct ShuttleDesc {
 };
 
 // A resolved scene shuttle as a ShuttleDesc: the scene's parameters, the resolved state, and the heading along the
-// velocity (a prograde start; the scene has no heading field). Returns false if the controller name is unknown.
+// absolute velocity (the scene has no heading field; Simulation replaces it by the direction of the velocity relative to
+// the shuttle's parent, so a shuttle orbiting a moving planet starts prograde). Returns false if the controller name is
+// unknown.
 bool shuttleDescFromResolved(const ResolvedShuttle& r, ShuttleDesc& out);
 
 inline constexpr std::int64_t kTickUnset = std::numeric_limits<std::int64_t>::min();
@@ -170,8 +172,9 @@ private:
     double tRef_;
 };
 
-// The node a shuttle orbits, for the controllers' observation (plan 5.9 / 15 item 2c: the deepest hierarchy node whose
-// Hill sphere contains the shuttle, else the system barycentre). id 0 means a barycentre node.
+// The node a shuttle orbits, for the controllers' observation (plan 5.9 / 15 item 2c: the hierarchy node with the smallest
+// Hill sphere that contains the shuttle, a body before a barycentre node of the same radius, else the system barycentre).
+// id 0 means a barycentre node.
 struct ParentRef {
     BodyId id = 0;
     double mu = 0.0;
@@ -265,8 +268,10 @@ public:
 //   thrust(h/2) -> drag(h/2) -> [DOPRI5 gravity step h] -> drag(h/2) -> thrust(h/2),
 // with the reaction-wheel rotation (exact) advanced by h/2 in each half. Thrust is the exact rocket dv along the heading
 // at the middle of the half step; drag is the exact update of plan 5.6 against air that rotates with each body.
-// Steps end exactly at t1 and at every controller tick k * environment.controllerTick at which the controller may change
-// its command (IController::nextTick; a Coast shuttle has no such tick). Controllers are evaluated at the start of the
+// Steps end exactly at t1, at every controller tick k * environment.controllerTick at which the controller may change
+// its command (IController::nextTick; a Coast shuttle has no such tick), and where a thrusting shuttle with finite fuel
+// runs out of it (so the burn never stops inside a step, where the kick of the thrust operator would misplace the
+// position by a * tau^2 / 2). Controllers are evaluated at the start of the
 // step that begins at the tick, with a command held in between (stored in the Shuttles arrays). Events (FuelEmpty) go
 // to `events`, a buffer owned by the calling thread. Nothing else is written outside element i of the store, so
 // different shuttles can be advanced from different threads at the same time.
