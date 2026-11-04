@@ -239,6 +239,65 @@ TEST_SUITE("app slow down")
         CHECK(d.warp().resumeValue() == 1.0e5);
     }
 
+    TEST_CASE("a step-down always names two real objects")
+    {
+        // The state of a watched shuttle falling at 1e5x: the prediction names the shuttle and Domus ...
+        SimDriver d(lucernaWithFaller(), SceneSettings{}, SimulationOptions{}, unlimited());
+        d.warp().set(1.0e5);
+        d.advance(kFrame);
+        DisplayState st = d.state();
+        const SlowDownReport live = predictSoonestImpact(st, {kFaller}, false, 1.0e7);
+        REQUIRE(live.cause == SlowDownReport::Cause::Shuttle);
+        CHECK(live.subject == kFaller);
+        CHECK(live.other != 0);
+
+        // ... but without an id (nothing to name) it is no cause, watched or not
+        REQUIRE(!st.shuttles.empty());
+        for (DisplayShuttle& s : st.shuttles) s.id = 0;
+        CHECK(predictSoonestImpact(st, {0}, true, 1.0e7).cause == SlowDownReport::Cause::None);
+
+        // Whatever the report, the message prints both names, "#id" for a name that is missing or empty
+        SlowDownReport r;
+        r.subject = 1006;
+        r.other = 4;
+        const auto names = [](std::uint64_t id) { return id == 4 ? std::string("Domus") : std::string(); };
+        CHECK(slowDownMessage(r, names, "2.78 h/sec") == "Slowing down for an approaching impact (#1006 and Domus): 2.78 h/sec");
+        CHECK(slowDownMessage(r, nullptr, "1.00 s/sec") == "Slowing down for an approaching impact (#1006 and #4): 1.00 s/sec");
+    }
+
+    TEST_CASE("after the crash and Resume warp nothing slows the warp down again")
+    {
+        // The Resume-warp scenario of the app: a watched shuttle falls, is stepped down to 1x, burns in, is destroyed; the user
+        // resumes the pre-slow-down warp and the clock runs on at 1e5x. Nothing is left to predict: the destroyed shuttle is
+        // not simulated any more and the bodies are not on a collision course.
+        SimDriver d(lucernaWithFaller(), SceneSettings{}, SimulationOptions{}, unlimited());
+        d.warp().set(1.0e5);
+        SlowDown slow;
+        slow.options.anyShuttle = true;   // the strictest setting: every shuttle counts
+        bool destroyed = false;
+        int afterResume = 0;
+        for (int f = 0; f < 12000 && afterResume < 1500; ++f) {
+            d.advance(kFrame);
+            for (const Event& e : d.dueEvents())
+                if (e.type == EventType::ShuttleDestroyed && e.id == kFaller) {
+                    destroyed = true;
+                    CHECK(d.warp().value() == 1.0);   // the slow-down got it to 1x before the impact
+                    REQUIRE(d.warp().resume());
+                    CHECK(d.warp().value() == 1.0e5);
+                }
+            const SlowDownReport r = slow.update(d, {kFaller});
+            if (destroyed) {
+                ++afterResume;
+                CHECK(r.cause == SlowDownReport::Cause::None);
+                CHECK_FALSE(r.steppedDown);
+                CHECK(d.warp().value() == 1.0e5);
+                if (r.cause != SlowDownReport::Cause::None) break;
+            }
+        }
+        REQUIRE(destroyed);
+        CHECK(afterResume >= 1500);   // 1500 frames at 1e5x are about 27 sim days
+    }
+
     TEST_CASE("the slow-down does not change the physics")
     {
         // the same final display time reached with and without slow-downs gives the same bits (physics is warp independent)

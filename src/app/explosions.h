@@ -19,6 +19,12 @@
 // 1x it lasts its sim lifetime. Both ages stand still while the clock is stopped. A fragment that reaches the surface of a
 // listed body stays there (rotating with it) until its life ends.
 //
+// Minimum size (plan 9.3). A shuttle-sized cloud is ~100 m wide, a single pixel at 2 km/px. The vertex stage (spark.vert)
+// therefore magnifies the fragment offsets from the contact point on the ground, for drawing only, until the typical fragment is
+// ~34 px away (1 when the cloud is that big anyway); the compute pass supplies the typical distance (per-frame statistics
+// buffer, see ExplosionStatsGpu) and ExplosionGpu::ground says that the contact point turns with the spin of the anchor's body.
+// Nothing of this is in the simulation or in the fragment state.
+//
 // Budget: kExplosionMaxFragments slots recycled oldest-first (a new explosion overwrites the oldest slots; an explosion that
 // loses all its slots disappears), kExplosionMaxLive explosions at once (the oldest is evicted beyond that).
 #include <cstdint>

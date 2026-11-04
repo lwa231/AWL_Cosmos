@@ -3,7 +3,7 @@
 // integrates the fragments and the additive draw of fragments + sparks. All the data comes from app::ExplosionFrame
 // (app/explosion_frame.h); nothing here feeds back into the simulation.
 //
-// Bindings: fragment pool = SSBO 8, explosion table = SSBO 9 (the frame uniform block at binding 0 must already be bound).
+// Bindings: fragment pool = SSBO 8, explosion table = SSBO 9, cloud statistics = SSBO 10 (the frame uniform block at binding 0 must already be bound).
 #include <cstdint>
 #include <string>
 #include "app/explosion_frame.h"
@@ -31,7 +31,7 @@ public:
 
 private:
     unsigned int compute_ = 0, draw_ = 0;
-    unsigned int pool_ = 0, table_ = 0;
+    unsigned int pool_ = 0, table_ = 0, stats_ = 0;
 };
 
 } // namespace render

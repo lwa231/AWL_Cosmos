@@ -19,12 +19,19 @@
 // would hold each level for 27 s and reach 1x with 30 s to go.) The pre-slow-down warp is kept by Warp for the Resume warp
 // button; nothing here changes it.
 //
+// Never a cause: a shuttle the display has already passed the contact time of (DisplayState lists no destroyed shuttle after its
+// contact time; one that the physics destroyed but the display has not reached, `dying`, is still approaching on screen and
+// DOES count), a body that is being absorbed by a merge, or an id that is 0. Every report with a cause therefore names two
+// different real objects, and slowDownMessage() always prints both.
+//
 // Not predicted: a shuttle already inside the trigger radius (kind Inside). It entered the air at the warp the user chose or
 // resumed; the Resume button must stay usable until the event.
 //
 // Headless and ML runs never slow down: leave options.enabled false there (the SimDriver itself never touches the warp).
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <string>
 #include <vector>
 #include "app/sim_driver.h"
 
@@ -54,6 +61,11 @@ double nextLowerWarp(double warp);
 // state. Only impacts with t <= horizon count; the result has cause None when there is none.
 SlowDownReport predictSoonestImpact(const DisplayState& state, const std::vector<std::uint64_t>& watchedShuttles, bool anyShuttle,
                                     double horizon);
+
+// The status line for a step-down: "Slowing down for an approaching impact (A and B): RATE". `nameOf` maps an id to its name; an
+// empty name is printed as "#id" so the pair is always named. `rate` is the new warp as text.
+std::string slowDownMessage(const SlowDownReport& report, const std::function<std::string(std::uint64_t)>& nameOf,
+                            const std::string& rate);
 
 class SlowDown {
 public:

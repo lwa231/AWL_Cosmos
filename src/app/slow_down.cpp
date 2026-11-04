@@ -18,6 +18,7 @@ int leafOf(const Hierarchy& h, int node, int bodyCount)
 void consider(SlowDownReport& best, const ImpactPrediction& p, double horizon, SlowDownReport::Cause cause, std::uint64_t subject,
               std::uint64_t other)
 {
+    if (subject == 0 || other == 0 || subject == other) return;   // a report must name two different objects
     if (!p.hits() || !(p.t <= horizon) || !(p.t < best.timeToImpact)) return;
     best.cause = cause;
     best.timeToImpact = p.t;
@@ -63,6 +64,9 @@ SlowDownReport predictSoonestImpact(const DisplayState& state, const std::vector
         return false;
     };
     for (const DisplayShuttle& s : state.shuttles) {
+        // A shuttle the physics already destroyed but the display has not reached (DisplayShuttle::dying) is still on screen and
+        // still approaching for the user: it counts. One the display has passed is no longer in the state at all.
+        if (s.id == 0) continue;
         if (!anyShuttle && !watched(s.id)) continue;
         const int node = shuttleParent(h, s.r);
         if (node < 0) continue;
@@ -94,6 +98,16 @@ SlowDownReport predictSoonestImpact(const DisplayState& state, const std::vector
         }
     }
     return best;
+}
+
+std::string slowDownMessage(const SlowDownReport& report, const std::function<std::string(std::uint64_t)>& nameOf,
+                            const std::string& rate)
+{
+    auto name = [&](std::uint64_t id) {
+        std::string n = nameOf ? nameOf(id) : std::string();
+        return n.empty() ? "#" + std::to_string(id) : n;
+    };
+    return "Slowing down for an approaching impact (" + name(report.subject) + " and " + name(report.other) + "): " + rate;
 }
 
 SlowDownReport SlowDown::update(SimDriver& driver, const std::vector<std::uint64_t>& watched)

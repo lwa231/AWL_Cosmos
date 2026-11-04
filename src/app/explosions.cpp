@@ -356,6 +356,7 @@ void ExplosionSystem::update(const DisplayState& st, double simDt, double realDt
             chosen.push_back(c.b);
         }
         g.bodyCount = static_cast<std::uint32_t>(chosen.size());
+        g.ground = ref ? 1u : 0u;   // chosen[0] is the anchor's own body
         for (std::size_t k = 0; k < chosen.size(); ++k) {
             const DisplayBody& b = *chosen[k];
             const Vec3 c = b.r - ex.anchor;
