@@ -16,6 +16,22 @@ find_package(OpenGL REQUIRED)
 add_library(glad STATIC external/glad/src/glad.c)
 target_include_directories(glad PUBLIC external/glad/include)
 
+# Dear ImGui (core + GLFW and OpenGL3 backends) and ImPlot, vendored in external/ (plan 16). Third-party code: built
+# without our warning flags. The OpenGL3 backend uses its own bundled loader, so it does not depend on GLAD. The demo
+# windows are left out (not compiled, ShowDemoWindow compiled out).
+add_library(imgui STATIC
+    external/imgui/imgui.cpp
+    external/imgui/imgui_draw.cpp
+    external/imgui/imgui_tables.cpp
+    external/imgui/imgui_widgets.cpp
+    external/imgui/backends/imgui_impl_glfw.cpp
+    external/imgui/backends/imgui_impl_opengl3.cpp
+    external/implot/implot.cpp
+    external/implot/implot_items.cpp)
+target_include_directories(imgui PUBLIC external/imgui external/implot external/icons)
+target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_DEMO_WINDOWS)
+target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
+
 # cosmos_core: physics library. No OpenGL/GLFW here, so it can run headless (tests).
 # Every .cpp in src/core is part of the library (CONFIGURE_DEPENDS picks up new files on the next build)
 file(GLOB COSMOS_CORE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/core/*.cpp)
@@ -101,7 +117,24 @@ endforeach()
 add_custom_target(copy_scenes ALL DEPENDS ${SCENE_OUTPUTS})
 add_dependencies(AWL_Cosmos copy_scenes)
 
-target_link_libraries(AWL_Cosmos PRIVATE cosmos_app cosmos_core glad glfw OpenGL::GL)
+# Fonts next to the exe too (Roboto + Font Awesome Solid, loaded from assets/fonts/ by the UI)
+file(GLOB FONT_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/assets/fonts/*.ttf ${CMAKE_SOURCE_DIR}/assets/fonts/*.otf)
+set(FONT_OUTPUTS "")
+foreach(font ${FONT_SOURCES})
+    get_filename_component(font_name ${font} NAME)
+    set(font_out ${CMAKE_BINARY_DIR}/assets/fonts/${font_name})
+    add_custom_command(
+        OUTPUT ${font_out}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${font} ${font_out}
+        DEPENDS ${font}
+        COMMENT "Copying font ${font_name}"
+    )
+    list(APPEND FONT_OUTPUTS ${font_out})
+endforeach()
+add_custom_target(copy_fonts ALL DEPENDS ${FONT_OUTPUTS})
+add_dependencies(AWL_Cosmos copy_fonts)
+
+target_link_libraries(AWL_Cosmos PRIVATE cosmos_app cosmos_core imgui glad glfw OpenGL::GL)
 
 # Build and run from the exe's folder so shaders/ resolves:  cmake --build build --target run
 add_custom_target(run

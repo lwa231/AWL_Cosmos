@@ -1,6 +1,8 @@
-// AWL Cosmos application (plan M4): loads a scene, runs it through SimDriver (clock + physics ahead + interpolation),
-// moves the camera and hands a camera-relative RenderFrame to the renderer. Plain GLFW input for now; the ImGui UI
-// and its input gating arrive in M6 (plan 10.4).
+// AWL Cosmos application (plan M4, M6): the scene lives in a RunControl (editor model + snapshot + SimDriver: clock, physics
+// ahead, interpolation), which the bottom bar's Start / Pause / Stop and the left panel drive; the camera moves and hands a
+// camera-relative RenderFrame to the renderer. The ImGui UI (bottom bar, labels, stats) is
+// drawn after the scene passes; the GLFW callbacks are installed BEFORE ImGui's so ImGui chains to them, and camera
+// and keyboard input is gated on ImGui's WantCapture* flags (plan 10.4).
 #include <glad/glad.h>   // must come BEFORE glfw3.h
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -21,11 +23,19 @@
 #include "app/camera.h"
 #include "app/format.h"
 #include "app/palette.h"
+#include "app/presets.h"
 #include "app/render_frame.h"
+#include "app/run_control.h"
 #include "app/sim_driver.h"
+#include "app/units.h"
 #include "core/kinds.h"
 #include "core/scene_json.h"
 #include "render/renderer.h"
+#include "ui/bottom_bar.h"
+#include "ui/labels.h"
+#include "ui/left_panel.h"
+#include "ui/theme.h"
+#include "ui/ui_context.h"
 
 using namespace cosmos;
 using namespace cosmos::app;
@@ -38,6 +48,7 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr double kClickSlopPx = 4.0;        // a press-release that moved less than this is a click, not a drag
 constexpr double kTitleInterval_s = 0.25;   // the window title (the M4 readout) is refreshed at this real-time interval
 constexpr double kNoticeSeconds = 4.0;
+constexpr double kStatsInterval_s = 0.1;    // conservation samples for the stats charts, real seconds
 
 std::string lower(std::string s)
 {
@@ -52,11 +63,25 @@ struct Options {
     double mpp = 0.0;                 // --mpp X: initial metres per pixel (0 = fit the whole system, or frame the --follow target)
     int width = kDefaultWidth, height = kDefaultHeight;   // --size W H: initial window size
     bool glDebug = false;             // --gl-debug: request a debug context and report GL errors (always on in Debug builds)
-    std::string scene = "scenes/lucerna.json";   // --scene path (relative to the working folder, like shaders/)
+    std::string scene = "scenes/lucerna.json";   // --scene path (relative to the working folder, like shaders/) or a preset id (empty, lucerna)
     double warp = 1.0;                // --warp X: initial time warp
     std::string follow;               // --follow NAME: start following this body or shuttle
     double fixedDt = 0.0;             // --fixed-dt S: use S seconds per frame instead of the real time (repeatable screenshots)
     int threads = 0;                  // --threads N: shuttle-pass worker threads (0 = hardware concurrency, at most 16)
+    bool ui = true;                   // --no-ui: draw only the scene (comparison runs)
+    float uiScale = 0.0f;             // --ui-scale X: UI scale instead of the window's content scale
+    std::string open;                 // --open view,sim,stats,edit,add: toolbar windows opened at start (nolabels: names off)
+    struct Click { int frame = 0; double x = 0.0, y = 0.0; };   // --click X,Y@FRAME: cursor moves at FRAME, presses at +1, releases at +2
+    std::vector<Click> clicks;
+    int slowDownAt = -1;              // --slow-down-at N: trigger one automatic slow-down level at frame N (shows "Resume warp")
+    std::string screenshotPrev;       // --screenshot-prev path.bmp: also write the frame before the last (needs --frames >= 2)
+    // --do COMMAND@FRAME: scripted editor and run commands for verification (see runCommand): new:empty, add:star,
+    // select:NAME, set:Mass=1 M_sun, orbit:PARENT,DISTANCE, start, pause, stop, save:PATH, load:PATH, delete, report, ...
+    struct Command { int frame = 0; std::string text; };
+    std::vector<Command> commands;
+    // --type TEXT@FRAME types characters into the focused ImGui field; --enter FRAME presses Enter there (field editing)
+    struct Typed { int frame = 0; std::string text; bool enter = false; };
+    std::vector<Typed> typed;
     // Scripted input for verification without a human: --press KEY@FRAME (a key as in the help text: 0-9, A-Z, '.', ',',
     // '/', '-', '=', Space, Tab, Esc; a leading '+' adds Shift) and --scroll STEPS@FRAME (wheel notches at the cursor,
     // which starts at the window centre).
@@ -95,6 +120,34 @@ bool parseArgs(int argc, char** argv, Options& o)
         else if (a == "--follow" && i + 1 < argc) o.follow = argv[++i];
         else if (a == "--fixed-dt" && i + 1 < argc) o.fixedDt = std::atof(argv[++i]);
         else if (a == "--threads" && i + 1 < argc) o.threads = std::atoi(argv[++i]);
+        else if (a == "--ui-scale" && i + 1 < argc) o.uiScale = static_cast<float>(std::atof(argv[++i]));
+        else if (a == "--open" && i + 1 < argc) o.open = argv[++i];
+        else if (a == "--screenshot-prev" && i + 1 < argc) o.screenshotPrev = argv[++i];
+        else if (a == "--click" && i + 1 < argc) {
+            Options::Click c;
+            const std::string v = argv[++i];
+            const std::size_t comma = v.find(','), at = v.rfind('@');
+            if (comma == std::string::npos || at == std::string::npos || at < comma) { std::cerr << "Bad value for --click: " << v << "\n"; return false; }
+            c.x = std::atof(v.c_str());
+            c.y = std::atof(v.c_str() + comma + 1);
+            c.frame = std::atoi(v.c_str() + at + 1);
+            o.clicks.push_back(c);
+        }
+        else if (a == "--slow-down-at" && i + 1 < argc) o.slowDownAt = std::atoi(argv[++i]);
+        else if (a == "--do" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            const std::size_t at = v.rfind('@');
+            if (at == std::string::npos) { std::cerr << "Bad value for --do (expected COMMAND@FRAME): " << v << "\n"; return false; }
+            o.commands.push_back({std::atoi(v.c_str() + at + 1), v.substr(0, at)});
+        }
+        else if (a == "--type" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            const std::size_t at = v.rfind('@');
+            if (at == std::string::npos) { std::cerr << "Bad value for --type (expected TEXT@FRAME): " << v << "\n"; return false; }
+            o.typed.push_back({std::atoi(v.c_str() + at + 1), v.substr(0, at), false});
+        }
+        else if (a == "--enter" && i + 1 < argc) o.typed.push_back({std::atoi(argv[++i]), std::string(), true});
+        else if (a == "--no-ui") o.ui = false;
         else if ((a == "--press" || a == "--scroll") && i + 1 < argc) {
             Options::Scripted sc;
             if (!parseScripted(argv[++i], a == "--scroll", sc)) { std::cerr << "Bad value for " << a << ": " << argv[i] << "\n"; return false; }
@@ -105,7 +158,10 @@ bool parseArgs(int argc, char** argv, Options& o)
         else {
             std::cerr << "Unknown or incomplete option: " << a << "\n"
                       << "Usage: AWL_Cosmos [--scene file.json] [--warp X] [--follow NAME] [--mpp X] [--size W H] [--frames N]\n"
-                      << "                  [--screenshot file.bmp] [--fixed-dt S] [--threads N] [--no-vsync] [--gl-debug]\n"
+                      << "                  [--screenshot file.bmp] [--screenshot-prev file.bmp] [--fixed-dt S] [--threads N]\n"
+                      << "                  [--no-vsync] [--gl-debug] [--no-ui] [--ui-scale X] [--open view,sim,stats,log,edit,add]\n"
+                      << "                  [--click X,Y@FRAME]... [--slow-down-at FRAME] [--do COMMAND@FRAME]...\n"
+                      << "                  [--type TEXT@FRAME]... [--enter FRAME]...\n"
                       << "                  [--press KEY@FRAME]... [--scroll STEPS@FRAME]...\n";
             return false;
         }
@@ -141,17 +197,34 @@ constexpr float kStarLightIntensity = 1.3f;
 // ---------------------------------------------------------------------------------------------------------------
 // The application state shared by the GLFW callbacks and the frame loop.
 struct App {
+    explicit App(const RunOptions& runOptions) : rc(runOptions), panel(rc) {}
+
     GLFWwindow* window = nullptr;
-    std::unique_ptr<SimDriver> driver;
+    RunControl rc;                   // editor model, snapshot and the SimDriver (a new driver object after some operations)
+    std::uint64_t seenGeneration = 0;   // rc.generation() the lookups below were built for
     Camera camera;
     CameraSources src;
     ShuttlePalette palette{2024};
+    ui::UiContext ui;                // ImGui context and backends (initialised after the callbacks below are installed)
+    ui::BottomBar bar;               // bottom bar, its windows, the event log and the stats history
+    ui::LeftPanel panel;             // the scene editor (list, fields, scene menu, add palette)
+    ui::LabelOptions labelOptions;
+    double lastStatSimTime = -1.0e300;   // physics time of the last conservation sample
 
     int winW = 0, winH = 0;          // window size in screen coordinates (cursor units)
     int fbW = 0, fbH = 0;            // framebuffer size in pixels
     bool dirty = true;               // framebuffer size changed
 
-    // Lookups rebuilt from driver->state() every frame (ids are unique across bodies and shuttles).
+    // Settings of the sim window. They belong to the user, not to a driver object: re-applied after every rebuild.
+    int threads = 1;
+    double controllerTick = 0.1;
+    bool infiniteFuel = false;
+
+    // A "frame this object" request from the panel, honoured once the object exists in the driver's state
+    struct PendingFrame { TargetKind kind = TargetKind::None; std::uint64_t id = 0; int tries = 0; };
+    PendingFrame pendingFrame;
+
+    // Lookups rebuilt from rc.driver().state() every frame (ids are unique across bodies and shuttles).
     std::unordered_map<std::uint64_t, std::size_t> bodyIndex, shuttleIndex;
     std::unordered_map<std::uint64_t, std::uint64_t> survivorOf;   // absorbed body -> survivor, from due Merge events
     std::unordered_map<std::uint64_t, std::string> names;          // every body and shuttle ever seen
@@ -173,11 +246,12 @@ struct App {
     Viewport viewport() const { return {fbW, fbH}; }
     double pixelScale() const { return winW > 0 ? static_cast<double>(fbW) / winW : 1.0; }   // window units -> pixels
 
-    const DisplayState& state() const { return driver->state(); }
+    const DisplayState& state() const { return rc.driver().state(); }
     void say(const std::string& s)
     {
         notice = s;
         noticeUntil = glfwGetTime() + kNoticeSeconds;
+        bar.log.push(s);
         std::cout << s << "\n";
     }
 };
@@ -197,7 +271,7 @@ void rebuildLookups(App& app)
         app.bodyIndex[st.bodies[i].id] = i;
         app.names[st.bodies[i].id] = st.bodies[i].name;
     }
-    const Shuttles& sh = app.driver->sim().shuttles();
+    const Shuttles& sh = app.rc.driver().sim().shuttles();
     for (std::size_t i = 0; i < st.shuttles.size(); ++i) {
         const DisplayShuttle& s = st.shuttles[i];
         app.shuttleIndex[s.id] = i;
@@ -218,7 +292,7 @@ void buildSources(App& app)
             out = a->state().bodies[it->second].r;
             return true;
         }
-        return a->driver->sim().bodyPositionAt(id, t, out);
+        return a->rc.driver().sim().bodyPositionAt(id, t, out);
     };
     s.bodyVelocity = [a](std::uint64_t id, double t, Vec3& out) {
         if (t == a->state().t) {
@@ -227,14 +301,14 @@ void buildSources(App& app)
             out = a->state().bodies[it->second].v;
             return true;
         }
-        return a->driver->sim().bodyVelocityAt(id, t, out);
+        return a->rc.driver().sim().bodyVelocityAt(id, t, out);
     };
     s.shuttlePosition = [a](std::uint64_t id, double t, Vec3& out) {
         auto it = a->shuttleIndex.find(id);
         if (it == a->shuttleIndex.end()) return false;
         const DisplayShuttle& sh = a->state().shuttles[it->second];
         if (t == a->state().t) { out = sh.r; return true; }
-        out = a->driver->sim().shuttlePositionAt(sh.index, t);
+        out = a->rc.driver().sim().shuttlePositionAt(sh.index, t);
         return true;
     };
     // System barycentre of the bodies at the display time (mu is proportional to mass).
@@ -389,7 +463,116 @@ void clickPick(App& app)
     double rx = 0.0, ry = 0.0;
     app.camera.windowToRelative(app.cursorX * k, app.cursorY * k, app.viewport(), rx, ry);
     const PickResult pr = pickNearest(cands, rx, ry, app.camera.metresPerPixel());
-    if (pr.hit) followTarget(app, pr.kind, pr.id, false);
+    if (pr.hit) {
+        followTarget(app, pr.kind, pr.id, false);
+        app.panel.selectObject(pr.id);   // the viewport pick selects it in the editor too (the list scrolls to it)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Run control glue (M6): what Start / Pause / Stop do beyond RunControl itself
+
+// Re-applies the sim window's settings to the current driver's simulation (a rebuild starts from the scene's settings).
+void applyPrefs(App& app)
+{
+    Simulation& sim = app.rc.driver().sim();
+    if (sim.threadCount() != app.threads) sim.setThreadCount(app.threads);
+    if (sim.controllerTick() != app.controllerTick) sim.setControllerTick(app.controllerTick);
+    if (sim.infiniteFuel() != app.infiniteFuel) sim.setInfiniteFuel(app.infiniteFuel);
+}
+
+void logEvent(App& app, const Event& e);
+void resetStats(App& app);
+
+// RunControl replaces its driver on some operations (start from Stopped, stop, load, an edit while paused): whatever was cached
+// from the old one is dropped, the settings are re-applied and the stats start over (the new simulation has its own
+// reference energy and momentum). Call once per frame after RunControl::advance.
+void syncGeneration(App& app)
+{
+    if (app.rc.generation() == app.seenGeneration) return;
+    app.seenGeneration = app.rc.generation();
+    // Events the old simulation had computed past the display time and an edit cut off: log them while the names of the old
+    // simulation are still known, and keep the merges so a followed body that was absorbed leads to its survivor.
+    const std::vector<Event> cutOff = app.rc.takeFlushedEvents();
+    for (const Event& e : cutOff) logEvent(app, e);
+    app.names.clear();
+    app.survivorOf.clear();
+    for (const Event& e : cutOff)
+        if (e.type == EventType::Merge) app.survivorOf[e.other] = e.id;
+    applyPrefs(app);
+    resetStats(app);
+}
+
+// Keys 1-9: the nine lowest body IDs of the scene as it starts (a merge must not renumber them)
+void fillNumberKeys(App& app)
+{
+    app.numberKeys = {};
+    std::vector<std::uint64_t> ids;
+    for (const DisplayBody& b : app.state().bodies) ids.push_back(b.id);
+    std::sort(ids.begin(), ids.end());
+    for (std::size_t k = 0; k < app.numberKeys.size() && k < ids.size(); ++k) app.numberKeys[k] = ids[k];
+}
+
+void resetStats(App& app)
+{
+    app.bar.stats.reset();
+    app.lastStatSimTime = -1.0e300;
+}
+
+void runStart(App& app)
+{
+    const bool fromStopped = app.rc.state() == RunState::Stopped;
+    const app::EditResult r = app.rc.start();
+    if (!r) { app.say(r.error); return; }
+    if (fromStopped) {
+        resetStats(app);
+        syncGeneration(app);
+        rebuildLookups(app);
+        fillNumberKeys(app);
+        app.say("Started: the scene was saved as the snapshot Stop returns to");
+    } else {
+        app.say("Resumed");
+    }
+    syncGeneration(app);
+    rebuildLookups(app);
+}
+
+void runPause(App& app)
+{
+    const app::EditResult r = app.rc.pause();
+    if (!r) { app.say(r.error); return; }
+    app.say("Paused: edit freely, Start continues");
+    syncGeneration(app);
+    rebuildLookups(app);
+}
+
+void runStop(App& app)
+{
+    const app::EditResult r = app.rc.stop();
+    if (!r) { app.say(r.error); return; }
+    resetStats(app);
+    app.say("Stopped: the scene is back as it was at Start");
+    syncGeneration(app);
+    rebuildLookups(app);
+}
+
+// A new document (preset or file) was loaded into the RunControl: a clean view, keys, stats and settings.
+void onSceneReplaced(App& app)
+{
+    syncGeneration(app);
+    rebuildLookups(app);
+    fillNumberKeys(app);
+    const SceneSettings& settings = app.rc.editor().scene().settings;
+    app.infiniteFuel = settings.infiniteFuel;
+    app.controllerTick = settings.controllerTick_s;
+    applyPrefs(app);
+    app.lastFollowedBody = 0;
+    app.pendingFrame = {};
+    app.camera.stopFollowing();
+    app.camera.setFrame(FrameMode::Inertial, 0, app.state().t, app.src);
+    app.camera.setCentreWorld({0.0, 0.0, 0.0});
+    app.camera.setMetresPerPixel(app.state().bodies.empty() ? 1.0e7 : fitSystemMpp(app));
+    resetStats(app);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -407,7 +590,7 @@ void framebufferSizeCallback(GLFWwindow* w, int width, int height)
 void scrollCallback(GLFWwindow* w, double, double dy)
 {
     auto* app = static_cast<App*>(glfwGetWindowUserPointer(w));
-    if (app->fbW <= 0 || dy == 0.0) return;
+    if (app->fbW <= 0 || dy == 0.0 || app->ui.wantsMouse()) return;   // the wheel scrolls a panel, not the camera
     const double k = app->pixelScale();
     app->camera.zoomAtWindow(dy, app->cursorX * k, app->cursorY * k, app->viewport());
 }
@@ -432,19 +615,21 @@ void mouseButtonCallback(GLFWwindow* w, int button, int action, int)
     if (button != GLFW_MOUSE_BUTTON_LEFT && button != GLFW_MOUSE_BUTTON_RIGHT) return;
     bool& down = button == GLFW_MOUSE_BUTTON_LEFT ? app->leftDown : app->rightDown;
     if (action == GLFW_PRESS) {
+        if (app->ui.wantsMouse()) return;   // the press belongs to a panel: no pan, no pick
         if (!app->leftDown && !app->rightDown) app->dragPx = 0.0;
         down = true;
     } else if (action == GLFW_RELEASE) {
+        const bool ours = down;             // the press went to the camera
         down = false;
-        if (button == GLFW_MOUSE_BUTTON_LEFT && app->dragPx < kClickSlopPx) clickPick(*app);
+        if (ours && button == GLFW_MOUSE_BUTTON_LEFT && app->dragPx < kClickSlopPx && !app->ui.wantsMouse()) clickPick(*app);
     }
 }
 
 void keyCallback(GLFWwindow* w, int key, int, int action, int mods)
 {
     auto* app = static_cast<App*>(glfwGetWindowUserPointer(w));
-    if (action == GLFW_RELEASE) return;
-    SimDriver& d = *app->driver;
+    if (action == GLFW_RELEASE || app->ui.wantsKeyboard()) return;   // typing into a field: no shortcuts
+    SimDriver& d = app->rc.driver();
     const bool repeat = action == GLFW_REPEAT;
 
     // Zoom keys may repeat; the rest act once per press.
@@ -458,7 +643,9 @@ void keyCallback(GLFWwindow* w, int key, int, int action, int mods)
     case GLFW_KEY_PERIOD: d.warp().stepUp(); break;                 // '.' warp up the ladder
     case GLFW_KEY_COMMA: d.warp().stepDown(); break;                // ',' warp down
     case GLFW_KEY_SLASH: d.warp().set(1.0); break;                  // '/' back to real time
-    case GLFW_KEY_SPACE: d.setPaused(!d.paused()); break;
+    case GLFW_KEY_SPACE:   // run <-> pause; from Stopped it starts
+        if (app->rc.running()) runPause(*app); else runStart(*app);
+        break;
     case GLFW_KEY_F: cycleFollow(*app, (mods & GLFW_MOD_SHIFT) ? -1 : 1); break;
     case GLFW_KEY_TAB: cycleFollow(*app, (mods & GLFW_MOD_SHIFT) ? -1 : 1); break;
     case GLFW_KEY_0: setFrameMode(*app, FrameMode::Inertial); break;
@@ -543,6 +730,112 @@ void fillFrame(const App& app, RenderFrame& frame)
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// UI glue (M6)
+
+// What the bottom bar drives: the RunControl (Start snapshots the scene, Pause captures the run into the editor, Stop restores
+// the snapshot, Save writes the current state) and the sim window's settings.
+class AppHost : public ui::RunHost {
+public:
+    explicit AppHost(App& a) : app_(a) {}
+
+    ui::RunState runState() const override
+    {
+        switch (app_.rc.state()) {
+        case RunState::Running: return ui::RunState::Running;
+        case RunState::Paused: return ui::RunState::Paused;
+        default: return ui::RunState::Stopped;
+        }
+    }
+    void start() override { runStart(app_); }
+    void pause() override { runPause(app_); }
+    void stop() override { runStop(app_); }
+    void saveCurrentAsScene() override { app_.panel.saveCurrent(); }
+    bool canStart() const override { return app_.rc.state() != RunState::Running; }
+    bool canPause() const override { return app_.rc.state() == RunState::Running; }
+    bool canStop() const override { return app_.rc.state() != RunState::Stopped; }
+
+    double warp() const override { return app_.rc.driver().warp().value(); }
+    void setWarp(double w) override { app_.rc.driver().warp().set(w); }
+    bool canResumeWarp() const override { return app_.rc.driver().warp().canResume(); }
+    double resumeWarpValue() const override { return app_.rc.driver().warp().resumeValue(); }
+    void resumeWarp() override { app_.rc.driver().warp().resume(); }
+
+    double displayTime() const override { return app_.rc.driver().targetTime(); }
+    bool physicsBehind() const override { return app_.rc.running() && app_.rc.driver().physicsBehind(); }
+
+    int threadCount() const override { return app_.threads; }
+    void setThreadCount(int n) override { app_.threads = n; applyPrefs(app_); }
+    double controllerTick() const override { return app_.controllerTick; }
+    void setControllerTick(double s) override
+    {
+        if (!std::isfinite(s) || s <= 0.0) {   // the simulation ignores such a value: do not show one it does not use
+            app_.say("The controller tick must be a positive number of seconds");
+            return;
+        }
+        app_.controllerTick = s;
+        applyPrefs(app_);
+    }
+    bool infiniteFuel() const override { return app_.infiniteFuel; }
+    void setInfiniteFuel(bool on) override { app_.infiniteFuel = on; applyPrefs(app_); }
+
+private:
+    App& app_;
+};
+
+// One label per visible object (plan 9.4 step 10), in ImGui screen coordinates (window units, y down).
+void buildLabels(const App& app, const RenderFrame& frame, std::vector<ui::LabelItem>& out)
+{
+    out.clear();
+    const DisplayState& st = app.state();
+    const Camera& cam = app.camera;
+    const double mpp = cam.metresPerPixel();
+    const double toUi = 1.0 / app.pixelScale();   // framebuffer pixels -> window units
+    const Follow f = cam.following();
+    auto toScreen = [&](const Vec3& world) {
+        const Camera::Rel r = cam.toCameraRelative(world);
+        return ImVec2(static_cast<float>((0.5 * app.fbW + r.x / mpp) * toUi), static_cast<float>((0.5 * app.fbH - r.y / mpp) * toUi));
+    };
+    for (const DisplayBody& b : st.bodies) {
+        if (b.absorbed) continue;
+        ui::LabelItem it;
+        it.pos = toScreen(b.r);
+        it.radiusPx = static_cast<float>(drawnRadiusPx(b.radius, mpp, frame.bodyMinPixels) * toUi);
+        it.text = b.name;
+        it.colour = ImVec4(0.45f + 0.55f * b.colour[0], 0.45f + 0.55f * b.colour[1], 0.45f + 0.55f * b.colour[2], 1.0f);
+        it.priority = 100.0f + static_cast<float>(std::log10(std::max(b.mu, 1.0)));   // heavier bodies win, bodies beat shuttles
+        it.highlighted = (f.kind == TargetKind::Body && f.id == b.id) || app.rc.editor().selected() == b.id;
+        out.push_back(std::move(it));
+    }
+    for (const DisplayShuttle& s : st.shuttles) {
+        if (s.dying) continue;
+        ui::LabelItem it;
+        it.pos = toScreen(s.r);
+        const double hullPx = std::max(static_cast<double>(frame.shuttleMinPixels), frame.shuttleLengthMetres / mpp);
+        it.radiusPx = static_cast<float>(0.5 * hullPx * toUi);
+        it.text = nameOf(app, s.id);
+        it.colour = ui::palette().textDim;
+        it.priority = 0.0f;
+        it.shuttle = true;
+        it.highlighted = (f.kind == TargetKind::Shuttle && f.id == s.id) || app.rc.editor().selected() == s.id;
+        out.push_back(std::move(it));
+    }
+}
+
+// Conservation sample for the stats charts: G times E, P, L at the physics time with the merge losses added back, and
+// the momentum scale sum(mu |v|).
+void sampleConservation(App& app)
+{
+    const Simulation& sim = app.rc.driver().sim();
+    if (sim.time() == app.lastStatSimTime) return;   // paused: nothing new to plot
+    app.lastStatSimTime = sim.time();
+    const Bodies& b = sim.bodies();
+    double scale = 0.0;
+    for (std::size_t i = 0; i < b.size(); ++i)
+        scale += b.mu[i] * std::sqrt(b.state.vx[i] * b.state.vx[i] + b.state.vy[i] * b.state.vy[i] + b.state.vz[i] * b.state.vz[i]);
+    app.bar.stats.recordConserved(sim.time(), sim.conservedWithMerges(), scale);
+}
+
 // Event log line for a due event.
 void logEvent(App& app, const Event& e)
 {
@@ -582,14 +875,18 @@ std::string frameLabel(const App& app)
 // The M4 readout: warp, achieved rate, date, followed object (the ImGui bottom bar replaces it in M6).
 std::string buildTitle(const App& app, double achievedRate)
 {
-    const SimDriver& d = *app.driver;
+    const SimDriver& d = app.rc.driver();
     std::string t = "AWL Cosmos | " + formatSimDate(d.targetTime()) + " | ";
-    t += d.paused() ? std::string("PAUSED") : "warp " + formatSig(d.warp().value(), 3) + "x (" + formatTimeRate(achievedRate) + ")";
+    switch (app.rc.state()) {
+    case RunState::Stopped: t += "STOPPED"; break;
+    case RunState::Paused: t += "PAUSED"; break;
+    case RunState::Running: t += "warp " + formatSig(d.warp().value(), 3) + "x (" + formatTimeRate(achievedRate) + ")"; break;
+    }
     const Follow f = app.camera.following();
     t += " | follow: " + (f.active() ? nameOf(app, f.id) : std::string("none"));
     t += " | frame: " + frameLabel(app);
     t += " | " + formatDistance(app.camera.metresPerPixel()) + "/px";
-    if (d.physicsBehind()) t += " | PHYSICS BEHIND";
+    if (app.rc.running() && d.physicsBehind()) t += " | PHYSICS BEHIND";
     if (glfwGetTime() < app.noticeUntil) t += " | " + app.notice;
     return t;
 }
@@ -599,6 +896,130 @@ void printHelp()
     std::cout << "Keys: wheel = zoom at cursor, drag = pan, click = follow, +/- PgUp/PgDn = zoom, . / , = warp up/down, / = 1x, Space = pause,\n"
                  "      1-9 = follow body n (4 = Domus), F / Tab (+Shift) = cycle follow target, Esc = stop following, Ctrl+Q = quit,\n"
                  "      0 / B / R = inertial / barycentre / relative-to-followed-body frame, H = fit the system\n";
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Scripted editor and run commands (--do COMMAND@FRAME): the same code paths as the panel and the bottom bar, so a headless run
+// can build a scene, run it, stop it, save it and load it again. Returns false (and prints why) when a command fails.
+
+bool lookupKind(const std::string& name, BodyKind& out)
+{
+    const std::string w = lower(name);
+    for (BodyKind k : {BodyKind::Star, BodyKind::Planet, BodyKind::GasGiant, BodyKind::DwarfPlanet, BodyKind::Moon,
+                       BodyKind::Asteroid, BodyKind::NeutronStar, BodyKind::BlackHole}) {
+        std::string n = lower(kindName(k));
+        n.erase(std::remove(n.begin(), n.end(), ' '), n.end());
+        if (w == n) { out = k; return true; }
+    }
+    return false;
+}
+
+bool lookupField(const std::string& name, app::Field& out)
+{
+    static const struct { const char* key; app::Field f; } table[] = {
+        {"name", app::Field::Name}, {"mass", app::Field::Mass}, {"radius", app::Field::Radius}, {"spin", app::Field::SpinPeriod},
+        {"atmorho", app::Field::AtmoRho0}, {"atmoh", app::Field::AtmoScaleHeight}, {"posx", app::Field::PosX},
+        {"posy", app::Field::PosY}, {"velx", app::Field::VelX}, {"vely", app::Field::VelY}, {"a", app::Field::OrbitA},
+        {"e", app::Field::OrbitE}, {"omega", app::Field::OrbitOmega}, {"m", app::Field::OrbitMeanAnomaly},
+        {"dry", app::Field::DryMass}, {"fuel", app::Field::FuelMass}, {"thrust", app::Field::MaxThrust},
+        {"exhaust", app::Field::ExhaustVelocity}, {"cda", app::Field::CdA}, {"collision", app::Field::CollisionRadius},
+        {"torque", app::Field::MaxTorque}, {"inertia", app::Field::Inertia}};
+    const std::string w = lower(name);
+    for (const auto& t : table)
+        if (w == t.key) { out = t.f; return true; }
+    return false;
+}
+
+std::uint64_t findObjectByName(const app::EditorModel& ed, const std::string& name)
+{
+    const std::string w = lower(name);
+    for (const SceneBody& b : ed.scene().bodies)
+        if (lower(b.name) == w) return b.id;
+    for (const SceneShuttle& s : ed.scene().shuttles)
+        if (lower(s.name) == w) return s.id;
+    return 0;
+}
+
+void printReport(App& app)
+{
+    const DisplayState& st = app.state();
+    const app::EditorModel& ed = app.rc.editor();
+    std::cout << "REPORT state=" << app::runStateName(app.rc.state()) << " scene='" << ed.scene().name << "' date=" << formatSimDate(st.t)
+              << " bodies=" << st.bodies.size() << " shuttles=" << st.shuttles.size() << " editorBodies=" << ed.scene().bodies.size()
+              << " editorShuttles=" << ed.scene().shuttles.size() << " selected=" << ed.selected() << " snapshot="
+              << (app.rc.snapshot() ? "yes" : "no") << " dirty=" << (app.rc.dirty() ? "yes" : "no") << "\n";
+    for (const DisplayBody& b : st.bodies) {
+        std::cout << "  body " << b.id << " '" << b.name << "' " << kindName(b.kind) << " mu=" << b.mu << " R=" << b.radius << " r=("
+                  << b.r.x << ", " << b.r.y << ") v=(" << b.v.x << ", " << b.v.y << ")\n";
+    }
+    for (const DisplayShuttle& s : st.shuttles)
+        std::cout << "  shuttle " << s.id << " '" << nameOf(app, s.id) << "' r=(" << s.r.x << ", " << s.r.y << ") v=(" << s.v.x << ", " << s.v.y << ")\n";
+}
+
+bool runCommand(App& app, const std::string& text)
+{
+    app::EditorModel& ed = app.rc.editor();
+    const std::size_t colon = text.find(':');
+    const std::string verb = lower(text.substr(0, colon));
+    const std::string arg = colon == std::string::npos ? std::string() : text.substr(colon + 1);
+    auto fail = [&](const std::string& why) {
+        std::cerr << "COMMAND FAILED [" << text << "]: " << why << "\n";
+        return false;
+    };
+    auto edit = [&](const app::EditResult& r) {
+        if (!r) return fail(r.error);
+        for (const std::string& w : r.warnings) std::cout << "  warning: " << w << "\n";
+        return true;
+    };
+
+    if (verb == "new") return app.panel.newScene(arg) || fail(app.panel.sceneMessage());
+    if (verb == "load") return app.panel.loadSceneFile(arg) || fail(app.panel.sceneMessage());
+    if (verb == "save") return app.panel.saveCurrent(arg) || fail(app.panel.sceneMessage());
+    if (verb == "start") { runStart(app); return app.rc.running() || fail("not running"); }
+    if (verb == "pause") { runPause(app); return app.rc.state() == RunState::Paused || fail("not paused"); }
+    if (verb == "stop") { runStop(app); return app.rc.state() == RunState::Stopped || fail("not stopped"); }
+    if (verb == "report") { printReport(app); return true; }
+    if (verb == "delete") return app.panel.deleteSelected() || fail("nothing deleted");
+    if (verb == "warp") { app.rc.driver().warp().set(std::atof(arg.c_str())); return true; }
+    if (verb == "add") {
+        if (lower(arg) == "shuttle") return app.panel.addShuttle() || fail("cannot add");
+        BodyKind k;
+        if (!lookupKind(arg, k)) return fail("unknown kind '" + arg + "'");
+        return app.panel.addBody(k) || fail("cannot add");
+    }
+    if (verb == "select") {
+        const std::uint64_t id = findObjectByName(ed, arg);
+        if (id == 0 || !app.panel.selectObject(id)) return fail("no object named '" + arg + "'");
+        return true;
+    }
+    const std::uint64_t sel = ed.selected();
+    if (sel == 0) return fail("no object is selected");
+    if (verb == "set") {
+        const std::size_t eq = arg.find('=');
+        app::Field f;
+        if (eq == std::string::npos || !lookupField(arg.substr(0, eq), f)) return fail("expected FIELD=TEXT with a known field");
+        return edit(app.panel.applyText(sel, f, arg.substr(eq + 1)));
+    }
+    if (verb == "kind") {
+        BodyKind k;
+        if (!lookupKind(arg, k)) return fail("unknown kind '" + arg + "'");
+        return edit(ed.setKind(sel, k, true));
+    }
+    if (verb == "controller") {
+        ControllerKind k;
+        if (!parseControllerKind(arg, k)) return fail("unknown controller '" + arg + "'");
+        return edit(ed.setController(sel, k));
+    }
+    if (verb == "orbit") {   // orbit:PARENT,DISTANCE
+        const std::size_t comma = arg.rfind(',');
+        if (comma == std::string::npos) return fail("expected PARENT,DISTANCE");
+        const std::uint64_t parent = findObjectByName(ed, arg.substr(0, comma));
+        if (parent == 0) return fail("no body named '" + arg.substr(0, comma) + "'");
+        const app::ParseResult d = app::parseQuantity(arg.substr(comma + 1), app::Quantity::Length, "m");
+        if (!d) return fail(d.error);
+        return edit(ed.setOrbitAround(sel, parent, d.value));
+    }
+    return fail("unknown command '" + verb + "'");
 }
 
 struct RunStats {
@@ -618,25 +1039,21 @@ int run(const Options& opt)
     const bool debugContext = opt.glDebug;
 #endif
 
-    // ---- Scene and simulation (plan 11.1, 4.4) ----
+    // ---- Scene and simulation options (plan 11.1, 4.4) ----
+    // The starting scene: a preset id ("empty", "lucerna") or a scene file. The default is the Lucerna preset's file.
     Scene scene;
     std::string err;
-    if (!loadSceneFile(opt.scene, scene, err)) {
+    const bool isPresetId = opt.scene.find_first_of("/\\.") == std::string::npos;
+    if (!(isPresetId ? loadPreset(opt.scene, defaultSceneDir(), scene, err) : loadSceneFromPath(opt.scene, scene, err))) {
         std::cerr << "Cannot load scene '" << opt.scene << "': " << err << "\n";
         return 1;
     }
-    ResolvedScene resolved;
-    if (!resolveScene(scene, resolved, err)) {
-        std::cerr << "Cannot resolve scene '" << opt.scene << "': " << err << "\n";
-        return 1;
-    }
-    for (const std::string& w : resolved.warnings) std::cerr << "Scene warning: " << w << "\n";
 
-    SimulationOptions so;
+    RunOptions runOptions;
+    SimulationOptions& so = runOptions.sim;
     const int hw = static_cast<int>(std::thread::hardware_concurrency());
     so.threads = std::max(1, std::min(16, opt.threads > 0 ? opt.threads : (hw > 0 ? hw : 1)));
-    so.startTime = scene.epoch_s;
-    DriverOptions dopt;
+    DriverOptions& dopt = runOptions.driver;
     if (opt.fixedDt > 0.0) dopt.physicsBudget_s = 0.0;   // repeatable runs: the physics may take as long as it needs
 
     // OpenGL 4.5 core (plan 9). KHR_debug is core since 4.3.
@@ -653,8 +1070,22 @@ int run(const Options& opt)
         return -1;
     }
 
-    App app;
+    App app(runOptions);
     app.window = window;
+    app.threads = so.threads;
+    app.infiniteFuel = scene.settings.infiniteFuel;
+    app.controllerTick = scene.settings.controllerTick_s;
+    {
+        const std::string sceneName = scene.name;
+        if (!app.rc.loadScene(std::move(scene), err)) {   // resolves the scene and builds the first driver
+            std::cerr << "Cannot resolve scene '" << opt.scene << "': " << err << "\n";
+            glfwDestroyWindow(window);
+            return 1;
+        }
+        std::cout << "Scene " << sceneName << " (" << app.rc.editor().scene().bodies.size() << " bodies, "
+                  << app.rc.editor().scene().shuttles.size() << " shuttles) loaded, " << so.threads << " threads\n";
+        for (const std::string& w : app.rc.buildWarnings()) std::cerr << "Scene warning: " << w << "\n";
+    }
     glfwSetWindowUserPointer(window, &app);
     glfwMakeContextCurrent(window);   // before gladLoadGLLoader
     glfwSwapInterval(opt.vsync ? 1 : 0);
@@ -684,20 +1115,28 @@ int run(const Options& opt)
         }
         renderer->resize(app.fbW, app.fbH);
 
-        app.driver = std::make_unique<SimDriver>(resolved, scene.settings, so, dopt);
-        app.driver->warp().set(opt.warp);
-        for (const std::string& w : app.driver->sim().warnings()) std::cerr << "Simulation warning: " << w << "\n";
+        app.rc.driver().warp().set(opt.warp);
+        app.seenGeneration = app.rc.generation();
+        applyPrefs(app);
         buildSources(app);
         rebuildLookups(app);
-        {
-            std::vector<std::uint64_t> ids;
-            for (const DisplayBody& b : app.state().bodies) ids.push_back(b.id);
-            std::sort(ids.begin(), ids.end());
-            for (std::size_t k = 0; k < app.numberKeys.size() && k < ids.size(); ++k) app.numberKeys[k] = ids[k];
-        }
-        std::cout << "Scene " << scene.name << ": " << app.state().bodies.size() << " bodies, " << app.state().shuttles.size()
-                  << " shuttles, " << so.threads << " threads\n";
+        fillNumberKeys(app);
         printHelp();
+
+        // The panel's hooks into the app: camera focus, the log, the view reset after a scene was loaded, the spawn point
+        app.panel.hooks.say = [&app](const std::string& text) { app.say(text); };
+        app.panel.hooks.focus = [&app](std::uint64_t id, bool shuttle, bool frame) {
+            const TargetKind kind = shuttle ? TargetKind::Shuttle : TargetKind::Body;
+            app.camera.follow(kind, id);
+            if (kind == TargetKind::Body) app.lastFollowedBody = id;
+            app.pendingFrame = frame ? App::PendingFrame{kind, id, 0} : App::PendingFrame{};
+        };
+        app.panel.hooks.sceneReplaced = [&app]() { onSceneReplaced(app); };
+        app.panel.hooks.spawnPosition = [&app]() {
+            Vec3 c = app.camera.centreWorld();
+            c.z = 0.0;
+            return c;
+        };
 
         // Start view: the whole system, or the --follow target framed; --mpp overrides the zoom.
         app.camera.setMetresPerPixel(fitSystemMpp(app));
@@ -710,6 +1149,23 @@ int run(const Options& opt)
         glfwSetCursorPosCallback(window, cursorPosCallback);
         glfwSetMouseButtonCallback(window, mouseButtonCallback);
         glfwSetKeyCallback(window, keyCallback);
+
+        // ImGui comes AFTER our callbacks: it installs its own and chains to ours (plan 10.4)
+        AppHost host(app);
+        if (opt.ui) {
+            ui::UiConfig uc;
+            uc.scaleOverride = opt.uiScale;
+            if (!app.ui.init(window, uc)) std::cerr << "UI initialisation failed: running without the UI\n";
+            const struct { const char* name; bool* flag; } windows[] = {
+                {"view", &app.bar.toolbar.view}, {"sim", &app.bar.toolbar.sim}, {"stats", &app.bar.toolbar.stats},
+                {"edit", &app.bar.toolbar.edit}, {"add", &app.bar.toolbar.add}};
+            for (const auto& w : windows)
+                if (opt.open.find(w.name) != std::string::npos) *w.flag = true;
+            if (opt.open.find("nolabels") != std::string::npos) app.bar.showLabels = false;
+        }
+        std::vector<ui::LabelItem> labelItems;
+        int labelsDrawn = 0;
+        double lastStatSample = -1.0, lastWall = glfwGetTime();
 
         RenderFrame frame;
         frame.clearColour[0] = 0.02f; frame.clearColour[1] = 0.022f; frame.clearColour[2] = 0.035f;
@@ -731,6 +1187,24 @@ int run(const Options& opt)
                 app.dirty = false;
             }
 
+            for (const Options::Click& c : opt.clicks) {   // scripted mouse (--click): move, press, release on consecutive frames
+                const int step = static_cast<int>(rs.frames + 1) - c.frame;
+                if (step == 0) app.ui.injectMouse(window, c.x, c.y, -1, 0);
+                else if (step == 1) app.ui.injectMouse(window, c.x, c.y, GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS);
+                else if (step == 2) app.ui.injectMouse(window, c.x, c.y, GLFW_MOUSE_BUTTON_LEFT, GLFW_RELEASE);
+            }
+            if (app.ui.initialised()) {   // typed characters and Enter for the focused ImGui field
+                ImGuiIO& io = ImGui::GetIO();
+                for (const Options::Typed& t : opt.typed) {
+                    const int step = static_cast<int>(rs.frames + 1) - t.frame;
+                    if (!t.enter && step == 0) io.AddInputCharactersUTF8(t.text.c_str());
+                    if (t.enter && step == 0) io.AddKeyEvent(ImGuiKey_Enter, true);
+                    if (t.enter && step == 1) io.AddKeyEvent(ImGuiKey_Enter, false);
+                }
+            }
+            for (const Options::Command& c : opt.commands)   // scripted editor / run commands (--do)
+                if (c.frame == rs.frames + 1 && !runCommand(app, c.text)) exitCode = 1;
+            if (opt.slowDownAt >= 0 && rs.frames + 1 == opt.slowDownAt) app.rc.driver().warp().slowDownOneLevel();
             for (const Options::Scripted& sc : opt.script) {   // scripted input (--press, --scroll) acts before the frame's update
                 if (sc.frame != rs.frames + 1) continue;
                 if (sc.scroll) scrollCallback(window, 0.0, sc.steps);
@@ -738,12 +1212,31 @@ int run(const Options& opt)
             }
 
             // Clock, physics ahead, state at the display time, events (plan 4.4)
-            const FrameInfo& fi = app.driver->advance(realDt);
-            for (const Event& e : app.driver->dueEvents()) {
-                if (e.type == EventType::Merge) app.survivorOf[e.other] = e.id;
-            }
+            // (RunControl steps the driver only while Running; otherwise it applies the pending edits)
+            const RunState stateBefore = app.rc.state();
+            const bool advanced = app.rc.advance(realDt);
+            if (stateBefore == RunState::Running && app.rc.state() != RunState::Running)   // the integrator failed: auto-paused
+                app.say(app.rc.lastError().empty() ? std::string("Paused") : app.rc.lastError());
+            syncGeneration(app);
+            static const FrameInfo idleInfo{};
+            const FrameInfo fi = advanced ? app.rc.driver().frameInfo() : idleInfo;   // a copy: the UI may replace the driver later in the frame
+            if (advanced)
+                for (const Event& e : app.rc.driver().dueEvents())
+                    if (e.type == EventType::Merge) app.survivorOf[e.other] = e.id;
             rebuildLookups(app);
-            for (const Event& e : app.driver->dueEvents()) logEvent(app, e);
+            if (app.pendingFrame.kind != TargetKind::None) {   // "frame this object" once it exists in the driver's state
+                const App::PendingFrame pf = app.pendingFrame;
+                const bool exists = pf.kind == TargetKind::Body ? app.bodyIndex.count(pf.id) > 0 : app.shuttleIndex.count(pf.id) > 0;
+                if (exists) {
+                    const double mpp = framingMpp(app, pf.kind, pf.id);
+                    if (mpp > 0.0) app.camera.setMetresPerPixel(mpp);
+                    app.pendingFrame = {};
+                } else if (++app.pendingFrame.tries > 4) {
+                    app.pendingFrame = {};
+                }
+            }
+            if (advanced)
+                for (const Event& e : app.rc.driver().dueEvents()) logEvent(app, e);
             titleSim += fi.simDelta;
             titleReal += fi.frameDt;
             rs.physicsSum += fi.physicsSeconds;
@@ -765,7 +1258,7 @@ int run(const Options& opt)
             }
 
             if (app.fbW > 0 && app.fbH > 0) {
-                frame.time = frameStart;
+                frame.time = opt.fixedDt > 0.0 ? static_cast<double>(rs.frames) * opt.fixedDt : frameStart;   // repeatable flicker with --fixed-dt
                 fillFrame(app, frame);
                 renderer->beginFrame(frame);
                 renderer->drawLines(render::LinePass::Underlay);
@@ -774,15 +1267,37 @@ int run(const Options& opt)
                 renderer->drawLines(render::LinePass::Overlay);
                 renderer->endFrame();
 
+                // UI last (plan 9.4 steps 10-11): labels in the foreground draw list, then the ImGui windows
+                if (app.ui.initialised()) {
+                    if (opt.fixedDt > 0.0 || frameStart - lastStatSample >= kStatsInterval_s) {
+                        sampleConservation(app);
+                        lastStatSample = frameStart;
+                    }
+                    app.bar.stats.recordFrame((frameStart - lastWall) * 1000.0, fi.physicsSeconds * 1000.0);
+                    lastWall = frameStart;
+                    app.ui.newFrame();
+                    const ImVec2 display = ImGui::GetIO().DisplaySize;
+                    app.bar.draw(host, display, app.ui.fontMedium());
+                    app.panel.draw(app.bar.toolbar, display, app.bar.height());
+                    app.labelOptions.show = app.bar.showLabels;
+                    app.labelOptions.keepOut = app.bar.occupied();
+                    app.labelOptions.keepOut.insert(app.labelOptions.keepOut.end(), app.panel.occupied().begin(), app.panel.occupied().end());
+                    buildLabels(app, frame, labelItems);
+                    labelsDrawn = ui::drawLabels(labelItems, app.labelOptions, app.ui.dpiScale());
+                    app.ui.render();
+                }
+
                 ++rs.frames;
                 if (rs.frames == 1) rs.wallStart = glfwGetTime();   // the first frame includes shader and buffer warm-up
                 const bool lastFrame = opt.frames >= 0 && rs.frames >= opt.frames;
-                if (lastFrame && !opt.screenshot.empty()) {
+                auto shoot = [&](const std::string& path) {
                     int w = 0, h = 0;
-                    if (renderer->readBackBuffer(pixels, w, h) && writeBmp24(opt.screenshot, w, h, pixels.data()))
-                        std::cout << "Wrote " << opt.screenshot << " (" << w << "x" << h << ")\n";
+                    if (renderer->readBackBuffer(pixels, w, h) && writeBmp24(path, w, h, pixels.data()))
+                        std::cout << "Wrote " << path << " (" << w << "x" << h << ")\n";
                     else { std::cerr << "Screenshot failed\n"; exitCode = 1; }
-                }
+                };
+                if (lastFrame && !opt.screenshot.empty()) shoot(opt.screenshot);
+                if (opt.frames >= 2 && rs.frames == opt.frames - 1 && !opt.screenshotPrev.empty()) shoot(opt.screenshotPrev);
                 if (rs.frames > 1) rs.cpuSum += glfwGetTime() - frameStart;
                 glfwSwapBuffers(window);
                 rs.wallEnd = glfwGetTime();
@@ -805,16 +1320,19 @@ int run(const Options& opt)
             std::cout << "Frames " << rs.frames << ": avg frame " << avg * 1000.0 << " ms (" << 1.0 / avg << " fps), avg CPU work "
                       << rs.cpuSum / n * 1000.0 << " ms, physics avg " << rs.physicsSum / static_cast<double>(rs.frames) * 1000.0
                       << " ms max " << rs.physicsMax * 1000.0 << " ms, body steps " << rs.bodySteps << ", physics-behind frames "
-                      << rs.behindFrames << ", sim time " << formatSimDate(app.driver->targetTime()) << "\n";
+                      << rs.behindFrames << ", sim time " << formatSimDate(app.rc.driver().targetTime()) << "\n";
         }
         std::cout << "Final readout: " << buildTitle(app, achievedRate) << "\n";
         const render::RenderStats& st = renderer->frameStats();
         const render::RenderTotals& tot = renderer->totals();
         std::cout << "Last frame: draw calls " << st.drawCalls << " (bodies " << st.bodyInstances << ", shuttles " << st.shuttleInstances
                   << ", line segments " << st.lineSegments << "), lights " << st.lightCount << ", streamed " << st.streamedBytes << " bytes\n";
+        std::cout << "UI: " << (app.ui.initialised() ? "on" : "off") << ", labels drawn in the last frame " << labelsDrawn
+                  << ", UI scale " << app.ui.dpiScale() << (app.ui.fontsLoaded() ? "" : " (fonts missing)") << "\n";
         std::cout << "Totals: frames " << tot.frames << ", GL errors " << tot.glErrors << ", GL warnings " << tot.glWarnings
                   << ", fence stalls " << tot.fenceStalls << ", buffer growths " << tot.arenaGrowths << "\n";
         if (tot.glErrors > 0) exitCode = 1;
+        app.ui.shutdown();   // while the context is current and the window alive (ImGui restores the GLFW callbacks)
         renderer->shutdown();
     }   // renderer destroyed while the context is still current
 
