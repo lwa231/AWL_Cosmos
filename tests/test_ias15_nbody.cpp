@@ -1,6 +1,7 @@
 #include <doctest.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <vector>
 #include "core/bodies.h"
 #include "core/constants.h"
@@ -125,6 +126,9 @@ TEST_SUITE("ias15 adaptive: Pythagorean three-body")
         const std::vector<double> mu = {3.0, 4.0, 5.0};
         const PythagoreanRun r = runPythagorean(1e-9, 100.0);
         REQUIRE(r.tReached == 100.0);
+        std::printf("[validation] Pythagorean: E(body 0 vs binary) %.4g, E(binary) %.4g, separation at t=100 %.4g, last close approach %.4g at t = %.4f, %ld steps\n",
+                    pairEnergy(r.final, mu, 0, 1, 2, true), pairEnergy(r.final, mu, 0, 1, 2, false),
+                    std::hypot(r.final.x[0] - r.final.x[1], r.final.y[0] - r.final.y[1]), r.closestApproach, r.closestApproachTime, r.steps);
         CHECK(r.steps < 40000); // measured 25165
         const double eEscape = pairEnergy(r.final, mu, 0, 1, 2, true);
         const double eBinary = pairEnergy(r.final, mu, 0, 1, 2, false);

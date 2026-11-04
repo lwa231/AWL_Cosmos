@@ -1,6 +1,7 @@
 #include <doctest.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include "core/bodies.h"
 #include "core/diagnostics.h"
 #include "core/gravity.h"
@@ -81,6 +82,8 @@ TEST_SUITE("yoshida4")
     {
         const double ratio = eccentricErrorAfterOnePeriod(stepYoshida4, 2000)
                            / eccentricErrorAfterOnePeriod(stepYoshida4, 4000);
+        std::printf("[validation] Yoshida e=0.5 order: error ratio 2000/4000 steps %.4f (errors %.4g, %.4g)\n", ratio,
+                    eccentricErrorAfterOnePeriod(stepYoshida4, 2000), eccentricErrorAfterOnePeriod(stepYoshida4, 4000));
         CHECK(ratio > 15.0);
         CHECK(ratio < 17.0);
     }

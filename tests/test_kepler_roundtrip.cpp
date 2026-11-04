@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <random>
 #include "core/kepler.h"
 
@@ -168,6 +169,8 @@ TEST_SUITE("kepler")
         std::mt19937_64 g(12345);
         double worstState = 0.0;
         int bad = 0;
+        double worstStrict = 0.0, worstAngle = 0.0, worstA = 0.0, worstE = 0.0; // e >= 1e-10 or e == 0 only for worstStrict
+        int nHyper = 0, nEllipse = 0, nTiny = 0;
 
         for (int i = 0; i < 2000; ++i) {
             const Case c = randomCase(g, i);
@@ -180,20 +183,30 @@ TEST_SUITE("kepler")
             const double stateErr = std::max(relErr(s2.r, s1.r), relErr(s2.v, s1.v));
             worstState = std::max(worstState, stateErr - (allowed - 1e-12));
             if (stateErr >= allowed) ++bad;
+            if (c.el.e >= 1e-10 || c.el.e == 0.0) worstStrict = std::max(worstStrict, stateErr);
+            if (c.el.e > 1.0) ++nHyper; else ++nEllipse;
+            if (c.el.e > 0.0 && c.el.e < 1e-10) ++nTiny;
 
             const double sgn = c.el.retrograde ? -1.0 : 1.0;
             const double angle0 = c.el.omega + sgn * c.el.M;
             const double angle1 = el1.omega + sgn * el1.M;
             if (c.el.e > 1e-6) {
+                worstA = std::max(worstA, std::abs(el1.a - c.el.a) / std::max(1.0, std::abs(c.el.a)));
+                worstE = std::max(worstE, std::abs(el1.e - c.el.e) / std::max(1.0, std::abs(c.el.e)));
                 CHECK(near(el1.a, c.el.a, 1e-12));
                 CHECK(near(el1.e, c.el.e, 1e-12));
                 CHECK(el1.retrograde == c.el.retrograde);
             }
             if (c.el.e < 1.0 || c.el.e > 1e-6) {
+                worstAngle = std::max(worstAngle, std::abs(wrapPi(angle1 - angle0)));
                 CHECK(std::abs(wrapPi(angle1 - angle0)) < 1e-9);
             }
         }
+        std::printf("[validation] Kepler round trip, 2000 orbits (%d elliptic, %d hyperbolic, %d with 0 < e < 1e-10): worst state error %.3g "
+                    "(e >= 1e-10 or e = 0 only: %.3g), worst a %.3g, worst e %.3g, worst omega+M %.3g\n",
+                    nEllipse, nHyper, nTiny, worstState, worstStrict, worstA, worstE, worstAngle);
         CHECK(bad == 0);
+        CHECK(worstStrict < 1e-12);
         CHECK(worstState < 1e-12);
     }
 }

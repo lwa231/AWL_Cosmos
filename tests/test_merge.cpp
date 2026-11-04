@@ -1,5 +1,6 @@
 #include <doctest.h>
 #include <cmath>
+#include <cstdio>
 #include "core/bodies.h"
 #include "core/constants.h"
 #include "core/diagnostics.h"
@@ -70,6 +71,8 @@ TEST_SUITE("merge")
         Bodies b = pair(0.3);
         MergeResult m;
         const Errors e = mergeAndCompare(b, 1, 2, &m);
+        std::printf("[validation] merge below omega_break: |omega_raw| %.4g < omega_break %.4g; P error %.3g, L error %.3g, dL logged %.3g, dE logged %.6g\n",
+                    std::abs(m.omegaRaw), m.omegaBreak, e.p, e.l, m.lostAngularMomentumG.z, m.dEnergyG);
         CHECK(!m.spinClamped);
         CHECK(std::abs(m.omegaRaw) < m.omegaBreak);
         CHECK(m.lostAngularMomentumG.z == 0.0);
@@ -86,6 +89,8 @@ TEST_SUITE("merge")
         Bodies b = pair(30.0);
         MergeResult m;
         const Errors e = mergeAndCompare(b, 1, 2, &m);
+        std::printf("[validation] merge above omega_break: |omega_raw| %.4g > omega_break %.4g; P error %.3g, L error (logged dL added back) %.3g, dL logged %.6g, dE logged %.6g\n",
+                    std::abs(m.omegaRaw), m.omegaBreak, e.p, e.l, m.lostAngularMomentumG.z, m.dEnergyG);
         REQUIRE(m.spinClamped);
         CHECK(std::abs(m.omegaRaw) > m.omegaBreak);
         CHECK(std::abs(b.spinRate[0]) == m.omegaBreak);
@@ -135,6 +140,7 @@ TEST_SUITE("merge")
             worstL = std::max(worstL, e.l);
         }
         // measured worst case 4.8e-16 over these 200 merges (a few ulps); the bound is the required 1e-14
+        std::printf("[validation] merge, 200 random planar/3D merges: worst P error %.3g, worst L error %.3g\n", worstP, worstL);
         CHECK(worstP <= 1e-14);
         CHECK(worstL <= 1e-14);
     }
