@@ -205,6 +205,33 @@ TEST_SUITE("app explosions")
         CHECK(h.bodies[0].indirectX == 0.0f);
     }
 
+    TEST_CASE("the table says whether the contact point turns with a ground body (render-time cloud magnification)")
+    {
+        DisplayState st = stateWithDomus(100.0, {1.0e9, 0.0, 0.0}, {0.0, 1.0e3, 0.0});
+        ExplosionSystem sys;
+        sys.spawn(specOn(st.bodies[0], {1.0, 0.0, 0.0}, 900));
+        ExplosionFrame f;
+        sys.update(st, 1.0, 0.016, kToCamera, f);
+        REQUIRE(f.active());
+        const ExplosionGpu& g = f.table[sys.explosions()[0].slot];
+        CHECK(g.ground == 1u);               // bodies[0] is the body the explosion happened on
+        CHECK(g.bodies[0].spin == doctest::Approx(7.0e-5f));
+        CHECK(sizeof(ExplosionStatsGpu) == 2 * sizeof(std::uint32_t) * kExplosionMaxLive);
+
+        // the body is gone from the display: the anchor carries on free, with no ground
+        DisplayState empty;
+        empty.t = 101.0;
+        DisplayBody other;
+        other.id = 42;
+        other.mu = 1.0e12;
+        other.radius = 1.0e4;
+        other.r = {0.0, 0.0, 0.0};
+        empty.bodies.push_back(other);
+        sys.update(empty, 1.0, 0.016, kToCamera, f);
+        REQUIRE(f.active());
+        CHECK(f.table[sys.explosions()[0].slot].ground == 0u);
+    }
+
     TEST_CASE("lifetimes run in sim time with a minimum real-time visibility")
     {
         const DisplayState st = stateWithDomus(100.0, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0});

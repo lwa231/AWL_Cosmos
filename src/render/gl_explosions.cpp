@@ -10,6 +10,7 @@ namespace render {
 namespace {
 constexpr GLuint kBindFragments = 8;
 constexpr GLuint kBindTable = 9;
+constexpr GLuint kBindStats = 10;
 constexpr GLuint kGroupSize = 64;   // local_size_x of fragments.comp
 }
 
@@ -28,6 +29,8 @@ bool ExplosionRenderer::init(const std::string& shaderDir)
     glNamedBufferStorage(pool_, static_cast<GLsizeiptr>(zeros.size()), zeros.data(), GL_DYNAMIC_STORAGE_BIT);
     glCreateBuffers(1, &table_);
     glNamedBufferStorage(table_, static_cast<GLsizeiptr>(sizeof(app::ExplosionGpu) * app::kExplosionMaxLive), nullptr, GL_DYNAMIC_STORAGE_BIT);
+    glCreateBuffers(1, &stats_);
+    glNamedBufferStorage(stats_, static_cast<GLsizeiptr>(sizeof(app::ExplosionStatsGpu)), nullptr, GL_DYNAMIC_STORAGE_BIT);
     return true;
 }
 
@@ -35,9 +38,10 @@ void ExplosionRenderer::destroy()
 {
     if (pool_) glDeleteBuffers(1, &pool_);
     if (table_) glDeleteBuffers(1, &table_);
+    if (stats_) glDeleteBuffers(1, &stats_);
     if (compute_) glDeleteProgram(compute_);
     if (draw_) glDeleteProgram(draw_);
-    pool_ = table_ = compute_ = draw_ = 0;
+    pool_ = table_ = stats_ = compute_ = draw_ = 0;
 }
 
 ExplosionRenderer::Result ExplosionRenderer::drawFrame(const app::ExplosionFrame& frame)
@@ -58,6 +62,9 @@ ExplosionRenderer::Result ExplosionRenderer::drawFrame(const app::ExplosionFrame
 
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, kBindFragments, pool_);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, kBindTable, table_);
+    const GLuint zero = 0;   // the compute pass accumulates this frame's cloud statistics from scratch
+    glClearNamedBufferData(stats_, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, &zero);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, kBindStats, stats_);
 
     glUseProgram(compute_);
     glUniform1ui(0, frame.fragmentCount);

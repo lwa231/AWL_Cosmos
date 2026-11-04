@@ -290,7 +290,7 @@ struct App {
 std::string nameOf(const App& app, std::uint64_t id)
 {
     auto it = app.names.find(id);
-    return it != app.names.end() ? it->second : "#" + std::to_string(id);
+    return it != app.names.end() && !it->second.empty() ? it->second : "#" + std::to_string(id);
 }
 
 void rebuildLookups(App& app)
@@ -1388,8 +1388,7 @@ int run(const Options& opt)
                 if (app.rc.editor().selected() != 0) watched.push_back(app.rc.editor().selected());
                 const SlowDownReport sd = app.slowDown.update(app.rc.driver(), watched);
                 if (sd.steppedDown)
-                    app.say("Slowing down for an approaching impact (" + nameOf(app, sd.subject) + " and " + nameOf(app, sd.other) + "): " +
-                            formatTimeRate(sd.warpAfter));
+                    app.say(slowDownMessage(sd, [&app](std::uint64_t id) { return nameOf(app, id); }, formatTimeRate(sd.warpAfter)));
             }
             if (opt.explodeAt > 0 && rs.frames + 1 == opt.explodeAt) devExplode(app, opt.explode);   // --explode (developer aid)
             titleSim += fi.simDelta;

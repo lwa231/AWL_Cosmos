@@ -7,7 +7,8 @@
 // the others (the CPU sends it as the "indirect" term, so the star and moons enter as tidal differences). Drag: the densest
 // atmosphere among the bodies, rho(h) = rho0 exp(-h/H), air co-rotating with the body, k = rho * ballistic.
 // A fragment that reaches a surface stays there, turning with the body, until its life ends. Visual only: nothing here feeds
-// back into the simulation.
+// back into the simulation. At the end of its work each fragment also adds its distance from the contact point on the (turning)
+// ground to a small per-explosion statistics buffer, which spark.vert uses for the render-time minimum cloud size (plan 9.3).
 //
 // Layouts: shaders mirror app/explosion_frame.h (FragmentGpu 64 B, ExplosionGpu 224 B).
 
@@ -27,12 +28,13 @@ struct Body {
 };
 struct Explosion {
     float anchorX, anchorY, dtSim, dtReal;
-    uint serial, bodyCount, pad0, pad1;
+    uint serial, bodyCount, ground, pad1;
     Body bodies[4];
 };
 
 layout(std430, binding = 8) buffer FragmentBuffer { Fragment frags[]; };
 layout(std430, binding = 9) readonly buffer ExplosionBuffer { Explosion explosions[]; };
+layout(std430, binding = 10) buffer StatsBuffer { uint statRoot[64]; uint statCount[64]; };   // per explosion slot, cleared by the CPU each frame
 layout(location = 0) uniform uint uCount;
 
 const float SUBSTEP = 0.025;       // s, the fixed substep (about one 60 Hz frame at 1x)
@@ -51,6 +53,17 @@ float altitudeOf(Body b, vec2 p, float tau, out vec2 centre)
     float a0 = b.altitude + (2.0 * dot(c0, vb) * tau + dot(vb, vb) * tau * tau) / max(n0 + n1, 1.0);
     float d = length(centre - p);
     return a0 + (dot(p, p) - 2.0 * dot(centre, p)) / max(d + n1, 1.0);
+}
+
+// Where the contact point of the explosion is on the turning ground, relative to the anchor (0 without a ground body). The anchor
+// stands still in the frame of the body's centre; the ground under it rotates about the centre by spin x age.
+vec2 groundPoint(Explosion e, float age)
+{
+    if (e.ground == 0u || e.bodyCount == 0u) return vec2(0.0);
+    Body b = e.bodies[0];
+    float th = b.spin * age;
+    float s2 = sin(0.5 * th);
+    return (2.0 * s2 * s2) * vec2(b.x, b.y) + sin(th) * vec2(b.y, -b.x);   // c - R(th) c
 }
 
 vec2 gravity(Explosion e, vec2 p, float tau)
@@ -151,4 +164,10 @@ void main()
         f.landed = landed;
     }
     frags[i] = f;
+
+    // Statistics for the draw pass: the typical distance of the live fragments from the contact point (a mean of square roots, so a
+    // few far-flung pieces do not decide it). Fixed point: sqrt(m) x 16, clamped so 20000 fragments cannot overflow 32 bits.
+    float dd = length(vec2(f.px, f.py) - groundPoint(e, f.simAge));
+    atomicAdd(statRoot[slot], uint(min(sqrt(dd), 10000.0) * 16.0));
+    atomicAdd(statCount[slot], 1u);
 }

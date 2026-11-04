@@ -58,10 +58,19 @@ struct ExplosionGpu {
     float dtSim = 0.0f, dtReal = 0.0f;      // this frame's sim and real seconds (0 on the frame of the spawn)
     std::uint32_t serial = 0;               // 0: slot unused
     std::uint32_t bodyCount = 0;
-    std::uint32_t pad0 = 0, pad1 = 0;
+    std::uint32_t ground = 0;               // 1: bodies[0] is the body the explosion happened on, so the contact point turns with its spin
+    std::uint32_t pad1 = 0;
     ExplosionBodyGpu bodies[4];
 };
 static_assert(sizeof(ExplosionGpu) == 32 + 4 * 48, "ExplosionGpu must match the std430 Explosion");
+
+// Per-explosion statistics the compute pass accumulates for the draw pass (render-time minimum cloud size, plan 9.3): std430
+// layout of the Stats buffer, one entry per table slot. Cleared by the renderer before every compute pass.
+struct ExplosionStatsGpu {
+    std::uint32_t sumRoot[kExplosionMaxLive];   // sum of sqrt(distance from the contact point on the ground) x 16, over the live fragments
+    std::uint32_t count[kExplosionMaxLive];     // live fragments counted
+};
+static_assert(sizeof(ExplosionStatsGpu) == 2 * 4 * kExplosionMaxLive, "ExplosionStatsGpu must match the std430 Stats buffer");
 
 // New fragments to write into pool slots [firstSlot, firstSlot + fragments.size()). A spawn that wraps the pool is two batches.
 struct FragmentBatch {
