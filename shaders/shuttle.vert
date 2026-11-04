@@ -1,6 +1,7 @@
 #version 450 core
-// All shuttles in ONE draw call. Each instance expands to 9 vertices: a flame quad (2 triangles, vertices 0-5) then the
-// hull triangle (vertices 6-8). Instance data is pulled from a storage buffer (no vertex attributes).
+// All shuttles in ONE draw call of 2N instances x 6 vertices. Instances 0..N-1 are the flame quads (2 triangles) and
+// instances N..2N-1 the hull triangles (vertices 3-5 collapse onto vertex 0), so every flame is drawn before every hull:
+// an additive flame never lands on top of another shuttle's opaque hull. Instance data is pulled from a storage buffer.
 #include "common.glsl"
 
 struct Shuttle {
@@ -26,7 +27,9 @@ const int  FLAME_TRI[6] = int[6](0, 1, 2, 2, 1, 3);   // quad corners 0..3 as tw
 
 void main()
 {
-    Shuttle s = shuttles[gl_InstanceID];
+    const int count = int(uCounts.z);
+    const bool isHull = gl_InstanceID >= count;
+    Shuttle s = shuttles[isHull ? gl_InstanceID - count : gl_InstanceID];
     float throttle = clamp(s.pose.w, 0.0, 1.0);
     float phase = s.colour0.w;
 
@@ -41,7 +44,7 @@ void main()
 
     vec2 local;
     int v = gl_VertexID;
-    if (v < 6) {
+    if (!isHull) {
         vKind = 0;
         int corner = FLAME_TRI[v];
         float along = float(corner >> 1);              // 0 at the nozzle, 1 at the tip
@@ -54,7 +57,7 @@ void main()
         vBary = vec3(0.0);
     } else {
         vKind = 1;
-        int i = v - 6;
+        int i = v < 3 ? v : 0;                         // second triangle of the 6 vertices is degenerate
         local = HULL[i];
         vBary = vec3(i == 0 ? 1.0 : 0.0, i == 1 ? 1.0 : 0.0, i == 2 ? 1.0 : 0.0);
         vFlame = vec2(0.0);

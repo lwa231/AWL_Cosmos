@@ -295,7 +295,8 @@ static int run(const Options& opt)
                 lastReport = now;
                 framesAtReport = framesDone;
             }
-            glfwPollEvents();
+            if (windowState.width > 0 && windowState.height > 0) glfwPollEvents();
+            else glfwWaitEventsTimeout(0.1);   // minimised: nothing is drawn or swapped, so block instead of spinning a core
         }
 
         const cosmos::render::RenderStats& st = renderer->frameStats();

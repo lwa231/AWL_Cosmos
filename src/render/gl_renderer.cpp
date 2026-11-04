@@ -44,7 +44,9 @@ struct SegmentGpu {       // 64 bytes
     float x0, y0, x1, y1;
     float c0[4];
     float c1[4];
-    float width, pad[3];
+    float width;
+    std::int32_t prev, next;   // neighbouring segment indices within the same buffer (mitred joint), or -1
+    std::int32_t pad;
 };
 static_assert(sizeof(BodyGpu) == 32 && sizeof(LightGpu) == 32, "body/light layout");
 static_assert(sizeof(ShuttleGpu) == 64 && sizeof(SegmentGpu) == 64, "shuttle/segment layout");
@@ -59,7 +61,7 @@ constexpr GLuint kBindLights = 1;
 constexpr GLuint kBindShuttles = 2;
 constexpr GLuint kBindSegments = 3;
 
-constexpr std::size_t kShuttleVertices = 9;   // 6 flame + 3 hull per instance
+constexpr std::size_t kShuttleVertices = 6;   // per instance; the draw has 2N instances: N flame quads, then N hulls
 constexpr float kTimeWrapSeconds = 3600.0f;   // keeps the float time precise; flicker is visual only
 
 // KHR_debug callback (core since 4.3)
@@ -192,19 +194,28 @@ void GlRenderer::resize(int w, int h)
 
 void GlRenderer::fillLines(const app::LineBatch& batch, SegmentGpu* out) const
 {
-    auto put = [&out](const app::LineVertex& a, const app::LineVertex& b, float width) {
+    const SegmentGpu* const first = out;
+    auto put = [&out](const app::LineVertex& a, const app::LineVertex& b, float width, std::int32_t prev, std::int32_t next) {
         SegmentGpu& s = *out++;
         s.x0 = a.x; s.y0 = a.y; s.x1 = b.x; s.y1 = b.y;
         s.c0[0] = a.r; s.c0[1] = a.g; s.c0[2] = a.b; s.c0[3] = a.a;
         s.c1[0] = b.r; s.c1[1] = b.g; s.c1[2] = b.b; s.c1[3] = b.a;
-        s.width = width; s.pad[0] = s.pad[1] = s.pad[2] = 0.0f;
+        s.width = width; s.prev = prev; s.next = next; s.pad = 0;
     };
     for (const app::LineStrip& strip : batch.strips) {
         if (strip.count < 2 || std::size_t(strip.first) + strip.count > batch.vertices.size()) continue;
-        for (std::uint32_t i = 0; i + 1 < strip.count; ++i)
-            put(batch.vertices[strip.first + i], batch.vertices[strip.first + i + 1], strip.widthPx);
+        const app::LineVertex* v = &batch.vertices[strip.first];
+        const std::int32_t n = static_cast<std::int32_t>(strip.count) - 1;      // segments in the strip
+        const std::int32_t base = static_cast<std::int32_t>(out - first);       // index of the strip's first segment
+        // A strip whose last vertex coincides with its first is a closed loop: its seam is mitred like any other joint
+        const bool closed = n >= 3 && v[0].x == v[n].x && v[0].y == v[n].y;
+        for (std::int32_t i = 0; i < n; ++i) {
+            const std::int32_t prev = i > 0 ? base + i - 1 : (closed ? base + n - 1 : -1);
+            const std::int32_t next = i + 1 < n ? base + i + 1 : (closed ? base : -1);
+            put(v[i], v[i + 1], strip.widthPx, prev, next);
+        }
     }
-    for (const app::LineSegment& seg : batch.segments) put(seg.a, seg.b, seg.widthPx);
+    for (const app::LineSegment& seg : batch.segments) put(seg.a, seg.b, seg.widthPx, -1, -1);
 }
 
 void GlRenderer::beginFrame(const app::RenderFrame& frame)
@@ -343,7 +354,7 @@ void GlRenderer::drawShuttles()
 {
     if (!inFrame_ || shuttles_.count == 0) return;
     glUseProgram(progShuttles_);
-    glDrawArraysInstanced(GL_TRIANGLES, 0, static_cast<GLsizei>(kShuttleVertices), static_cast<GLsizei>(shuttles_.count));
+    glDrawArraysInstanced(GL_TRIANGLES, 0, static_cast<GLsizei>(kShuttleVertices), static_cast<GLsizei>(2 * shuttles_.count));
     ++stats_.drawCalls;
     ++stats_.shuttleDrawCalls;
 }

@@ -4,7 +4,7 @@
 #include "common.glsl"
 #include "bodies.glsl"
 
-layout(location = 0) in vec2 vLocal;
+layout(location = 0) flat in vec2 vCentre;
 layout(location = 1) flat in float vDrawRadius;
 layout(location = 2) flat in uint  vBody;
 layout(location = 3) flat in float vMarker;
@@ -19,8 +19,12 @@ void main()
     Body b = bodies[vBody];
     vec3 base = vec3(b.r, b.g, b.b);
 
+    // Position relative to the disc centre from gl_FragCoord, not from an interpolated varying: the rim distance is
+    // then exact in pixels even when the radius is millions of pixels.
+    vec2 rel = gl_FragCoord.xy - 0.5 * uViewport.xy - vCentre;
+    float insidePx = vDrawRadius - length(rel);          // distance inside the rim in pixels
+    vec2 vLocal = rel / vDrawRadius;                     // disc radius 1
     float d = length(vLocal);
-    float insidePx = (1.0 - d) * vDrawRadius;            // distance inside the rim in pixels
     float coverage = clamp(insidePx + 0.5, 0.0, 1.0);    // smooth 1-px edge
     if (coverage <= 0.0) discard;
 

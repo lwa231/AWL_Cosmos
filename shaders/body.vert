@@ -3,7 +3,7 @@
 #include "common.glsl"
 #include "bodies.glsl"
 
-layout(location = 0) out vec2  vLocal;      // quad coordinates scaled so the disc has radius 1
+layout(location = 0) flat out vec2  vCentre;       // disc centre in centre-origin pixels (same frame as gl_FragCoord - viewport/2)
 layout(location = 1) flat out float vDrawRadius;   // on-screen disc radius in pixels (>= half the minimum marker size)
 layout(location = 2) flat out uint  vBody;
 layout(location = 3) flat out float vMarker;       // 1 when drawn as a minimum-size marker
@@ -11,16 +11,25 @@ layout(location = 3) flat out float vMarker;       // 1 when drawn as a minimum-
 void main()
 {
     Body b = bodies[gl_InstanceID];
-    vec2 corner = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1)) * 2.0 - 1.0;   // triangle strip order
+    vec2 corner01 = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));   // triangle strip order
 
     float radiusPx = b.radius * uScale.y;
     float drawRadius = max(radiusPx, 0.5 * uScale.w);
     float halfSize = drawRadius + 1.5;                      // margin for the anti-aliased edge
 
     vec2 centrePx = vec2(b.x, b.y) * uScale.y;
-    gl_Position = uProj * vec4(centrePx + corner * halfSize, 0.0, 1.0);
+    // The quad is clamped to the viewport (plus a margin): a planet far larger than the screen then covers it with a
+    // normal-sized quad, and the fragment shader works from gl_FragCoord, so nothing is interpolated across 1e6 pixels.
+    vec2 viewHalf = 0.5 * uViewport.xy + 2.0;
+    vec2 lo = max(centrePx - halfSize, -viewHalf);
+    vec2 hi = min(centrePx + halfSize, viewHalf);
+    if (lo.x > hi.x || lo.y > hi.y) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);             // entirely off-screen: culled
+    } else {
+        gl_Position = uProj * vec4(mix(lo, hi, corner01), 0.0, 1.0);
+    }
 
-    vLocal = corner * (halfSize / drawRadius);
+    vCentre = centrePx;
     vDrawRadius = drawRadius;
     vBody = uint(gl_InstanceID);
     vMarker = radiusPx < drawRadius ? 1.0 : 0.0;
