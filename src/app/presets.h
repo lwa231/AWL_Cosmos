@@ -1,9 +1,9 @@
 #pragma once
 // Scene presets and user scene files (plan sections 11.1, 11.2, 10.3). No OpenGL, no ImGui.
 //
-// Presets are the entries of the "new scene" menu: Empty sandbox (built in) and Lucerna (scenes/lucerna.json). The real
-// solar system is added in M8 (plan 11.2): append one entry to the table in presets.cpp (id "solar_system", file
-// "solar_system.json") or call registerPreset at start-up; nothing else in the editor or the UI needs to change, because
+// Presets are the entries of the "new scene" menu: Empty sandbox (built in), Lucerna (scenes/lucerna.json) and the Real
+// solar system (scenes/solar_system.json, JPL Horizons data, plan 11.2). More can be added by appending to the table in
+// presets.cpp or calling registerPreset at start-up; nothing else in the editor or the UI needs to change, because
 // they list presets() and load through loadPreset. A preset whose file is missing is reported by presetAvailable() so a
 // menu can grey it out.
 //
