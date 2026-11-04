@@ -178,6 +178,25 @@
       "orbit": { "parent": 13, "a": 2.6e6, "e": 0.0, "argPeriapsis_deg": 0.0, "meanAnomaly_deg": 90.0, "retrograde": false }
     }
   ],
-  "shuttles": [],
+  "shuttles": [
+    { "id": 1001, "name": "Shuttle 1", "controller": "Coast",
+      "orbit": { "parent": 4, "a": 7.2e5, "e": 0.0, "argPeriapsis_deg": 0.0, "meanAnomaly_deg": 0.0, "retrograde": false } },
+    { "id": 1002, "name": "Shuttle 2", "controller": "Coast",
+      "orbit": { "parent": 4, "a": 7.2e5, "e": 0.0, "argPeriapsis_deg": 0.0, "meanAnomaly_deg": 180.0, "retrograde": false } },
+    { "id": 1003, "name": "Shuttle 3", "controller": "Prograde",
+      "orbit": { "parent": 4, "a": 1.2e6, "e": 0.0, "argPeriapsis_deg": 0.0, "meanAnomaly_deg": 90.0, "retrograde": false } },
+    { "id": 1004, "name": "Shuttle 4", "controller": "Wander",
+      "orbit": { "parent": 4, "a": 2.0e6, "e": 0.05, "argPeriapsis_deg": 30.0, "meanAnomaly_deg": 45.0, "retrograde": false } },
+    { "id": 1005, "name": "Shuttle 5", "controller": "Coast",
+      "orbit": { "parent": 4, "a": 3.465e6, "e": 0.0, "argPeriapsis_deg": 0.0, "meanAnomaly_deg": 270.0, "retrograde": true } },
+    { "id": 1006, "name": "Shuttle 6", "controller": "Retrograde",
+      "orbit": { "parent": 4, "a": 2.0e7, "e": 0.0, "argPeriapsis_deg": 0.0, "meanAnomaly_deg": 200.0, "retrograde": false } },
+    { "id": 1007, "name": "Shuttle 7", "controller": "Coast",
+      "orbit": { "parent": 5, "a": 3.0e5, "e": 0.0, "argPeriapsis_deg": 0.0, "meanAnomaly_deg": 0.0, "retrograde": false } },
+    { "id": 1008, "name": "Shuttle 8", "controller": "Wander",
+      "orbit": { "parent": 5, "a": 5.0e5, "e": 0.02, "argPeriapsis_deg": 90.0, "meanAnomaly_deg": 120.0, "retrograde": false } },
+    { "id": 1009, "name": "Shuttle 9", "controller": "Coast",
+      "orbit": { "parent": 6, "a": 1.2e5, "e": 0.0, "argPeriapsis_deg": 0.0, "meanAnomaly_deg": 60.0, "retrograde": false } }
+  ],
   "settings": { "infiniteFuel": false, "controllerTick_s": 0.1 }
 }

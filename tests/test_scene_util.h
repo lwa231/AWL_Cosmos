@@ -25,6 +25,8 @@ struct Lucerna {
     {
         std::string err;
         REQUIRE_MESSAGE(cosmos::loadSceneFile(sceneFile("lucerna.json"), scene, err), err);
+        // The shipped scene carries demo shuttles for the app (M4); the physics tests want the bare system and add their own.
+        scene.shuttles.clear();
         REQUIRE_MESSAGE(cosmos::resolveScene(scene, res, err), err);
     }
 
