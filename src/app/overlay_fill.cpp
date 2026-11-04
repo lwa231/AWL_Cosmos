@@ -110,5 +110,29 @@ void appendAtmospheres(RenderFrame& frame, const std::vector<DisplayBody>& bodie
     }
 }
 
+const std::vector<BodyRadii>& RadiiCache::get(const std::vector<DisplayBody>& bodies, std::uint64_t generation, double realNow)
+{
+    bool same = generation == generation_ && bodies.size() == ids_.size();
+    for (std::size_t i = 0; same && i < bodies.size(); ++i) same = bodies[i].id == ids_[i];
+    // A clock that went backwards (a new run) also forces a recomputation.
+    if (!same || realNow - computedAt_ >= minRealGap || realNow < computedAt_) {
+        radii_ = computeBodyRadii(bodies);
+        ids_.resize(bodies.size());
+        for (std::size_t i = 0; i < bodies.size(); ++i) ids_[i] = bodies[i].id;
+        generation_ = generation;
+        computedAt_ = realNow;
+        ++computations_;
+    }
+    return radii_;
+}
+
+void RadiiCache::reset()
+{
+    radii_.clear();
+    ids_.clear();
+    generation_ = ~std::uint64_t(0);
+    computedAt_ = -1.0e300;
+}
+
 } // namespace app
 } // namespace cosmos

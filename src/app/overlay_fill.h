@@ -8,6 +8,7 @@
 #include "app/render_frame.h"
 #include "app/sim_driver.h"
 #include "core/vec3.h"
+#include <cstdint>
 #include <vector>
 
 namespace cosmos {
@@ -29,6 +30,26 @@ struct BodyRadii {
 std::vector<BodyRadii> computeBodyRadii(const std::vector<Vec3>& r, const std::vector<Vec3>& v,
                                         const std::vector<double>& mu, const std::vector<double>& radius);
 std::vector<BodyRadii> computeBodyRadii(const std::vector<DisplayBody>& bodies);
+
+// Throttled, cached computeBodyRadii for the interactive app (the hierarchy is O(n^3)). The radii change slowly, so they are
+// recomputed at most every `minRealGap` real seconds (4 Hz by default), at once when the generation, the set of bodies (ids,
+// in order: the circles are matched to frame.bodies by index) changes, and never while nothing asks for them.
+class RadiiCache {
+public:
+    double minRealGap = 0.25;   // real seconds between recomputations (plan 9.5 leaves the cadence open)
+
+    // `realNow` is a monotonic real-time clock in seconds (RenderFrame::time). The reference stays valid until the next call.
+    const std::vector<BodyRadii>& get(const std::vector<DisplayBody>& bodies, std::uint64_t generation, double realNow);
+    void reset();
+    int computations() const { return computations_; }   // tests
+
+private:
+    std::vector<BodyRadii> radii_;
+    std::vector<std::uint64_t> ids_;
+    std::uint64_t generation_ = ~std::uint64_t(0);
+    double computedAt_ = -1.0e300;
+    int computations_ = 0;
+};
 
 struct CircleSet {
     bool hill = true;

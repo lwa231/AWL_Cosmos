@@ -168,4 +168,32 @@ TEST_SUITE("app circles")
         CHECK(f.atmospheres[0].scaleHeight == 7000.0f);
         CHECK(f.atmospheres[0].tint.b > f.atmospheres[0].tint.r);        // a blue world gets a blue sky
     }
+
+    TEST_CASE("radii cache: recomputes at its cadence, and at once when the generation or the bodies change")
+    {
+        std::vector<DisplayBody> bodies(2);
+        bodies[0].id = 1; bodies[0].mu = 1.327e20; bodies[0].radius = 6.96e8;
+        bodies[1].id = 2; bodies[1].mu = 3.986e14; bodies[1].radius = 6.371e6;
+        bodies[1].r = {1.496e11, 0.0, 0.0};
+        bodies[1].v = {0.0, 29780.0, 0.0};
+
+        RadiiCache cache;
+        cache.minRealGap = 0.25;
+        CHECK(cache.get(bodies, 1, 10.0).size() == 2);
+        CHECK(cache.computations() == 1);
+        cache.get(bodies, 1, 10.1);                       // inside the gap: cached
+        CHECK(cache.computations() == 1);
+        cache.get(bodies, 1, 10.3);                       // gap passed
+        CHECK(cache.computations() == 2);
+        cache.get(bodies, 2, 10.31);                      // a rebuilt simulation
+        CHECK(cache.computations() == 3);
+        bodies[1].id = 3;                                 // the set of bodies changed
+        cache.get(bodies, 2, 10.32);
+        CHECK(cache.computations() == 4);
+        bodies.pop_back();
+        CHECK(cache.get(bodies, 2, 10.33).size() == 1);
+        CHECK(cache.computations() == 5);
+        cache.get(bodies, 2, 1.0);                        // the clock went backwards
+        CHECK(cache.computations() == 6);
+    }
 }

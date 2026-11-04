@@ -1,4 +1,5 @@
 #include "render/renderer.h"
+#include "render/gl_explosions.h"
 #include "render/gl_shader.h"
 #include "render/gl_stream.h"
 #include <glad/glad.h>
@@ -110,6 +111,7 @@ public:
     void drawBodies() override;
     void drawShuttles() override;
     void drawLines(LinePass pass) override;
+    void drawExplosions() override;
     void endFrame() override;
     const RenderStats& frameStats() const override { return stats_; }
     const RenderTotals& totals() const override { return totals_; }
@@ -135,6 +137,7 @@ private:
     unsigned int vao_ = 0;     // core profile needs a VAO bound even though all data is pulled from storage buffers
     unsigned int frameUbo_ = 0;
     StreamArena arena_;
+    ExplosionRenderer explosions_;   // fragment pool + compute + additive draw (gl_explosions.cpp)
 
     const app::RenderFrame* frame_ = nullptr;
     bool inFrame_ = false;
@@ -184,6 +187,10 @@ bool GlRenderer::init(const RendererConfig& config)
     }
 
     glCreateQueries(GL_TIME_ELAPSED, 2, wellQuery_);
+    if (!explosions_.init(config.shaderDir)) {
+        shutdown();
+        return false;
+    }
     glCreateVertexArrays(1, &vao_);
     // Starts at 1 MiB per segment (3 MiB mapped); grows by doubling if a frame needs more.
     if (!arena_.init(std::size_t(1) << 20)) {
@@ -201,6 +208,7 @@ void GlRenderer::shutdown()
     if (debugCallbackSet_) glDebugMessageCallback(nullptr, nullptr);   // the callback points at totals_
     debugCallbackSet_ = false;
     arena_.destroy();
+    explosions_.destroy();
     if (vao_) glDeleteVertexArrays(1, &vao_);
     if (progBodies_) glDeleteProgram(progBodies_);
     if (progShuttles_) glDeleteProgram(progShuttles_);
@@ -494,6 +502,15 @@ void GlRenderer::drawLines(LinePass pass)
     glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(r.count));
     ++stats_.drawCalls;
     ++stats_.lineDrawCalls;
+}
+
+void GlRenderer::drawExplosions()
+{
+    if (!inFrame_ || !frame_) return;
+    const ExplosionRenderer::Result r = explosions_.drawFrame(frame_->explosions);
+    stats_.drawCalls += r.drawCalls;
+    stats_.explosionDrawCalls += r.drawCalls;
+    stats_.explosionFragments += r.fragments;
 }
 
 void GlRenderer::endFrame()

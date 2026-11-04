@@ -21,12 +21,15 @@
 #include <vector>
 #include "app/bmp_writer.h"
 #include "app/camera.h"
+#include "app/explosions.h"
 #include "app/format.h"
 #include "app/overlay_fill.h"
+#include "app/overlays.h"
 #include "app/palette.h"
 #include "app/presets.h"
 #include "app/render_frame.h"
 #include "app/run_control.h"
+#include "app/slow_down.h"
 #include "app/sim_driver.h"
 #include "app/units.h"
 #include "core/kinds.h"
@@ -75,6 +78,8 @@ struct Options {
     struct Click { int frame = 0; double x = 0.0, y = 0.0; };   // --click X,Y@FRAME: cursor moves at FRAME, presses at +1, releases at +2
     std::vector<Click> clicks;
     int slowDownAt = -1;              // --slow-down-at N: trigger one automatic slow-down level at frame N (shows "Resume warp")
+    std::string explode;              // --explode BODY@FRAME (developer aid, M7): a test explosion on BODY's surface at the camera centre
+    int explodeAt = -1;
     std::string screenshotPrev;       // --screenshot-prev path.bmp: also write the frame before the last (needs --frames >= 2)
     // --do COMMAND@FRAME: scripted editor and run commands for verification (see runCommand): new:empty, add:star,
     // select:NAME, set:Mass=1 M_sun, orbit:PARENT,DISTANCE, start, pause, stop, save:PATH, load:PATH, delete, report, ...
@@ -88,9 +93,12 @@ struct Options {
     // which starts at the window centre).
     struct Scripted { int frame = 0; bool scroll = false; int key = 0; int mods = 0; double steps = 0.0; };
     std::vector<Scripted> script;
-    // M7 DEV WIRING (shaders agent): --dev-overlays wells,atmo,hill,soi,roche feeds and draws those passes without the view
-    // window toggles, for screenshots. The integrator replaces this with the ViewOverlays checkboxes.
-    std::string devOverlays;
+    // --overlays LIST: switches overlays on at start, as if the View window's checkboxes were ticked, for screenshots. LIST is
+    // comma separated: vel, acc, trails, orbits, path, wells, hill, soi, roche, atmo or all.
+    std::string overlays;
+    // --shot FILE.bmp@FRAME: also write the back buffer at the end of FRAME (several allowed; --screenshot is the last frame)
+    struct Shot { int frame = 0; std::string path; };
+    std::vector<Shot> shots;
 };
 
 // Parses "KEY@FRAME" / "STEPS@FRAME" for --press / --scroll. Returns false on a malformed or unknown key.
@@ -138,6 +146,12 @@ bool parseArgs(int argc, char** argv, Options& o)
             o.clicks.push_back(c);
         }
         else if (a == "--slow-down-at" && i + 1 < argc) o.slowDownAt = std::atoi(argv[++i]);
+        else if (a == "--explode" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            const std::size_t at = v.rfind('@');
+            o.explode = v.substr(0, at);
+            o.explodeAt = at == std::string::npos ? 1 : std::atoi(v.c_str() + at + 1);
+        }
         else if (a == "--do" && i + 1 < argc) {
             const std::string v = argv[++i];
             const std::size_t at = v.rfind('@');
@@ -159,7 +173,13 @@ bool parseArgs(int argc, char** argv, Options& o)
         }
         else if (a == "--no-vsync") o.vsync = false;
         else if (a == "--gl-debug") o.glDebug = true;
-        else if (a == "--dev-overlays" && i + 1 < argc) o.devOverlays = argv[++i];
+        else if (a == "--overlays" && i + 1 < argc) o.overlays = argv[++i];
+        else if (a == "--shot" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            const std::size_t at = v.rfind('@');
+            if (at == std::string::npos) { std::cerr << "Bad value for --shot (expected FILE@FRAME): " << v << "\n"; return false; }
+            o.shots.push_back({std::atoi(v.c_str() + at + 1), v.substr(0, at)});
+        }
         else {
             std::cerr << "Unknown or incomplete option: " << a << "\n"
                       << "Usage: AWL_Cosmos [--scene file.json] [--warp X] [--follow NAME] [--mpp X] [--size W H] [--frames N]\n"
@@ -167,7 +187,8 @@ bool parseArgs(int argc, char** argv, Options& o)
                       << "                  [--no-vsync] [--gl-debug] [--no-ui] [--ui-scale X] [--open view,sim,stats,log,edit,add]\n"
                       << "                  [--click X,Y@FRAME]... [--slow-down-at FRAME] [--do COMMAND@FRAME]...\n"
                       << "                  [--type TEXT@FRAME]... [--enter FRAME]...\n"
-                      << "                  [--press KEY@FRAME]... [--scroll STEPS@FRAME]...\n";
+                      << "                  [--press KEY@FRAME]... [--scroll STEPS@FRAME]...\n"
+                      << "                  [--overlays vel,acc,trails,orbits,path,wells,hill,soi,roche,atmo|all] [--shot FILE.bmp@FRAME]...\n";
             return false;
         }
     }
@@ -214,6 +235,10 @@ struct App {
     ui::BottomBar bar;               // bottom bar, its windows, the event log and the stats history
     ui::LeftPanel panel;             // the scene editor (list, fields, scene menu, add palette)
     ui::LabelOptions labelOptions;
+    SlowDown slowDown;               // warp step-down for approaching impacts (M7, plan 8)
+    ExplosionSystem explosions;      // explosion registry; fills RenderFrame::explosions (M7, plan 9.7)
+    OverlayBuilder overlays;         // arrows, trails, osculating orbits, predicted path (M7, plan 9.5)
+    RadiiCache radiiCache;           // throttled Hill / SOI / Roche radii for the circles
     double lastStatSimTime = -1.0e300;   // physics time of the last conservation sample
 
     int winW = 0, winH = 0;          // window size in screen coordinates (cursor units)
@@ -257,8 +282,9 @@ struct App {
         notice = s;
         noticeUntil = glfwGetTime() + kNoticeSeconds;
         bar.log.push(s);
-        std::cout << s << "\n";
+        std::cout << (frameNo >= 0 ? "(f" + std::to_string(frameNo) + ") " : std::string()) << s << "\n";   // frame: for --shot / --do scripting
     }
+    long long frameNo = -1;   // the frame being built (1-based), -1 before the loop
 };
 
 std::string nameOf(const App& app, std::uint64_t id)
@@ -502,6 +528,9 @@ void syncGeneration(App& app)
     for (const Event& e : cutOff) logEvent(app, e);
     app.names.clear();
     app.survivorOf.clear();
+    app.explosions.clear();   // the old simulation's events and bodies are gone
+    app.overlays.reset();     // trails, orbits and the prediction belong to the old simulation (Stop, Start, load, edit rebuild)
+    app.radiiCache.reset();
     for (const Event& e : cutOff)
         if (e.type == EventType::Merge) app.survivorOf[e.other] = e.id;
     applyPrefs(app);
@@ -735,6 +764,97 @@ void fillFrame(const App& app, RenderFrame& frame)
     }
 }
 
+// The View window's switches into the overlay builder (called every frame; cheap).
+void applyOverlaySettings(App& app)
+{
+    const ui::ViewOverlays& v = app.bar.overlays;
+    OverlaySettings& s = app.overlays.settings;
+    s.velocityArrows = v.velocityArrows;
+    s.accelerationArrows = v.accelerationArrows;
+    s.trails = v.trails;
+    s.osculatingOrbits = v.osculatingOrbits;
+    s.predictedPath = v.predictedPath;
+    s.arrowLengthPx = static_cast<double>(v.arrowLengthPx);
+    s.arrowMode = v.arrowScaling <= 0 ? ArrowScale::Linear : (v.arrowScaling == 1 ? ArrowScale::Sqrt : ArrowScale::Log);
+    // The predicted path follows the followed object; with nothing followed, the selected object of the editor.
+    TargetKind kind = TargetKind::None;
+    std::uint64_t id = 0;
+    if (app.camera.following().kind == TargetKind::None && app.rc.editor().selected() != 0) {
+        id = app.rc.editor().selected();
+        if (app.shuttleIndex.count(id)) kind = TargetKind::Shuttle;
+        else if (app.bodyIndex.count(id)) kind = TargetKind::Body;
+        else id = 0;
+    }
+    app.overlays.setPredictionTarget(kind, id);
+}
+
+// Plan 9.4 steps 2-5 and 9: everything the overlays add to the frame, after fillFrame pushed the bodies (the well, atmosphere
+// and circle arrays read the camera-relative body positions from frame.bodies, in the order of the display bodies).
+void fillOverlays(App& app, RenderFrame& frame)
+{
+    applyOverlaySettings(app);
+    const ui::ViewOverlays& v = app.bar.overlays;
+    const std::vector<DisplayBody>& bodies = app.state().bodies;
+    if (v.gravityRings) appendWells(frame, bodies);
+    if (v.atmospheres) appendAtmospheres(frame, bodies);
+    if (v.hill || v.soi || v.roche) {
+        CircleSet which;
+        which.hill = v.hill;
+        which.soi = v.soi;
+        which.roche = v.roche;
+        // The O(n^3) hierarchy is recomputed at 4 Hz, not every frame (RadiiCache).
+        appendCircles(frame, app.radiiCache.get(bodies, app.rc.generation(), frame.time), which);
+    }
+    app.overlays.build(app.rc.driver(), app.rc.generation(), OverlayView::fromCamera(app.camera), frame);
+}
+
+// --overlays LIST (screenshots): ticks the View window's checkboxes.
+void applyOverlayFlag(ui::ViewOverlays& v, const std::string& list)
+{
+    auto has = [&list](const char* w) { return list.find(w) != std::string::npos; };
+    const bool all = has("all");
+    v.velocityArrows = all || has("vel");
+    v.accelerationArrows = all || has("acc");
+    v.trails = all || has("trails");
+    v.osculatingOrbits = all || has("orbits");
+    v.predictedPath = all || has("path");
+    v.gravityRings = all || has("wells");
+    v.hill = all || has("hill");
+    v.soi = all || has("soi");
+    v.roche = all || has("roche");
+    v.atmospheres = all || has("atmo");
+}
+
+// Developer aid for --explode BODY@FRAME: a shuttle-sized explosion on the surface of BODY, under the camera centre (the camera
+// is moved onto the contact point, still following the body), so the effect can be checked without waiting for a crash.
+void devExplode(App& app, const std::string& bodyName)
+{
+    const std::string want = lower(bodyName);
+    for (const DisplayBody& b : app.state().bodies) {
+        if (lower(b.name) != want) continue;
+        Vec3 dir = app.camera.centreWorld() - b.r;
+        dir.z = 0.0;
+        const double n = norm(dir);
+        dir = n > 0.0 ? dir / n : Vec3{0.0, 1.0, 0.0};
+        ExplosionSpec spec;
+        spec.contact = b.r + dir * (b.radius + 1.0);
+        spec.refBody = b.id;
+        spec.refPos = b.r;
+        spec.refVel = b.v;
+        spec.refSpin = b.spinRate;
+        spec.normal = dir;
+        spec.impactVelocity = dir * -3000.0;
+        spec.impactorRadius = 2.0;
+        spec.sourceId = b.id;
+        spec.time = app.state().t;
+        app.explosions.spawn(spec);
+        app.camera.setCentreWorld(spec.contact);
+        std::cout << "Test explosion on " << b.name << "\n";
+        return;
+    }
+    std::cerr << "--explode: no body named '" << bodyName << "'\n";
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // UI glue (M6)
 
@@ -783,6 +903,8 @@ public:
     }
     bool infiniteFuel() const override { return app_.infiniteFuel; }
     void setInfiniteFuel(bool on) override { app_.infiniteFuel = on; applyPrefs(app_); }
+    bool slowDownAnyShuttle() const override { return app_.slowDown.options.anyShuttle; }
+    void setSlowDownAnyShuttle(bool on) override { app_.slowDown.options.anyShuttle = on; }
 
 private:
     App& app_;
@@ -981,6 +1103,7 @@ bool runCommand(App& app, const std::string& text)
     if (verb == "load") return app.panel.loadSceneFile(arg) || fail(app.panel.sceneMessage());
     if (verb == "save") return app.panel.saveCurrent(arg) || fail(app.panel.sceneMessage());
     if (verb == "start") { runStart(app); return app.rc.running() || fail("not running"); }
+    if (verb == "resumewarp") return app.rc.driver().warp().resume() || fail("nothing to resume");   // the Resume warp button (M7)
     if (verb == "pause") { runPause(app); return app.rc.state() == RunState::Paused || fail("not paused"); }
     if (verb == "stop") { runStop(app); return app.rc.state() == RunState::Stopped || fail("not stopped"); }
     if (verb == "report") { printReport(app); return true; }
@@ -1148,6 +1271,9 @@ int run(const Options& opt)
         if (!opt.follow.empty()) followByName(app, opt.follow, true);
         if (opt.mpp > 0.0) app.camera.setMetresPerPixel(opt.mpp);
         app.camera.update(app.state().t, app.src);
+        applyOverlayFlag(app.bar.overlays, opt.overlays);
+        app.overlays.setShuttlePalette(&app.palette);
+        app.overlays.setPredictorOptions(runOptions.sim);   // the predicted path integrates like the live simulation
 
         glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);
         glfwSetScrollCallback(window, scrollCallback);
@@ -1219,6 +1345,7 @@ int run(const Options& opt)
             // Clock, physics ahead, state at the display time, events (plan 4.4)
             // (RunControl steps the driver only while Running; otherwise it applies the pending edits)
             const RunState stateBefore = app.rc.state();
+            app.frameNo = static_cast<long long>(rs.frames) + 1;
             const bool advanced = app.rc.advance(realDt);
             if (stateBefore == RunState::Running && app.rc.state() != RunState::Running)   // the integrator failed: auto-paused
                 app.say(app.rc.lastError().empty() ? std::string("Paused") : app.rc.lastError());
@@ -1242,6 +1369,30 @@ int run(const Options& opt)
             }
             if (advanced)
                 for (const Event& e : app.rc.driver().dueEvents()) logEvent(app, e);
+            // M7: explosions for the events that became due, and the warp step-down (the integrator may move this block).
+            if (advanced) {
+                for (const Event& e : app.rc.driver().dueEvents()) {
+                    app.overlays.onEvent(e);
+                    // The followed shuttle crashed: follow the body it hit (keeping the view), so the explosion stays on screen.
+                    if (e.type == EventType::ShuttleDestroyed && e.other != 0 && app.camera.following().kind == TargetKind::Shuttle &&
+                        app.camera.following().id == e.id) {
+                        const auto it = app.bodyIndex.find(e.other);
+                        if (it != app.bodyIndex.end() && it->second < app.state().bodies.size()) {
+                            app.camera.followKeepingView(TargetKind::Body, e.other, app.state().bodies[it->second].r);
+                            app.lastFollowedBody = e.other;
+                        }
+                    }
+                }
+                app.explosions.handleEvents(app.rc.driver().dueEvents(), app.state(), app.rc.driver().sim());
+                std::vector<std::uint64_t> watched;   // the followed shuttle and the selected object (an id that is not a shuttle is ignored)
+                if (app.camera.following().kind == TargetKind::Shuttle) watched.push_back(app.camera.following().id);
+                if (app.rc.editor().selected() != 0) watched.push_back(app.rc.editor().selected());
+                const SlowDownReport sd = app.slowDown.update(app.rc.driver(), watched);
+                if (sd.steppedDown)
+                    app.say("Slowing down for an approaching impact (" + nameOf(app, sd.subject) + " and " + nameOf(app, sd.other) + "): " +
+                            formatTimeRate(sd.warpAfter));
+            }
+            if (opt.explodeAt > 0 && rs.frames + 1 == opt.explodeAt) devExplode(app, opt.explode);   // --explode (developer aid)
             titleSim += fi.simDelta;
             titleReal += fi.frameDt;
             rs.physicsSum += fi.physicsSeconds;
@@ -1265,16 +1416,14 @@ int run(const Options& opt)
             if (app.fbW > 0 && app.fbH > 0) {
                 frame.time = opt.fixedDt > 0.0 ? static_cast<double>(rs.frames) * opt.fixedDt : frameStart;   // repeatable flicker with --fixed-dt
                 fillFrame(app, frame);
-                // M7 DEV WIRING: see Options::devOverlays. Circles' radii are recomputed every frame (O(n^3) hierarchy; fine for a
-                // handful of bodies, the integrator should throttle it).
-                if (!opt.devOverlays.empty()) {
-                    auto has = [&opt](const char* w) { return opt.devOverlays.find(w) != std::string::npos; };
-                    if (has("wells")) appendWells(frame, app.state().bodies);
-                    if (has("atmo")) appendAtmospheres(frame, app.state().bodies);
-                    CircleSet cs;
-                    cs.hill = has("hill"); cs.soi = has("soi"); cs.roche = has("roche");
-                    if (cs.hill || cs.soi || cs.roche) appendCircles(frame, computeBodyRadii(app.state().bodies), cs);
-                }
+                fillOverlays(app, frame);
+                app.explosions.update(app.state(), fi.simDelta, fi.frameDt,
+                                      [&app](const Vec3& w, float& x, float& y) {
+                                          const Camera::Rel r = app.camera.toCameraRelative(w);
+                                          x = r.x;
+                                          y = r.y;
+                                      },
+                                      frame.explosions);
                 renderer->beginFrame(frame);
                 renderer->drawGravityWells();
                 renderer->drawAtmospheres();
@@ -1282,6 +1431,7 @@ int run(const Options& opt)
                 renderer->drawCircles();
                 renderer->drawBodies();
                 renderer->drawShuttles();
+                renderer->drawExplosions();
                 renderer->drawLines(render::LinePass::Overlay);
                 renderer->endFrame();
 
@@ -1314,6 +1464,8 @@ int run(const Options& opt)
                         std::cout << "Wrote " << path << " (" << w << "x" << h << ")\n";
                     else { std::cerr << "Screenshot failed\n"; exitCode = 1; }
                 };
+                for (const Options::Shot& sh : opt.shots)
+                    if (sh.frame == rs.frames) shoot(sh.path);
                 if (lastFrame && !opt.screenshot.empty()) shoot(opt.screenshot);
                 if (opt.frames >= 2 && rs.frames == opt.frames - 1 && !opt.screenshotPrev.empty()) shoot(opt.screenshotPrev);
                 if (rs.frames > 1) rs.cpuSum += glfwGetTime() - frameStart;
@@ -1344,7 +1496,7 @@ int run(const Options& opt)
         const render::RenderStats& st = renderer->frameStats();
         const render::RenderTotals& tot = renderer->totals();
         std::cout << "Last frame: draw calls " << st.drawCalls << " (bodies " << st.bodyInstances << ", shuttles " << st.shuttleInstances
-                  << ", line segments " << st.lineSegments << "), lights " << st.lightCount << ", streamed " << st.streamedBytes << " bytes\n";
+                  << ", line segments " << st.lineSegments << ", explosion draws " << st.explosionDrawCalls << " over " << st.explosionFragments << " fragments), lights " << st.lightCount << ", streamed " << st.streamedBytes << " bytes\n";
         if (tot.wellsGpuSamples > 0)
             std::cout << "Gravity-well pass GPU time: avg " << tot.wellsGpuMsSum / static_cast<double>(tot.wellsGpuSamples) << " ms over "
                       << tot.wellsGpuSamples << " samples (last " << tot.wellsGpuMsLast << " ms)\n";

@@ -250,10 +250,19 @@ void BottomBar::drawViewWindow(ImVec2 display, float barTop)
         ImGui::Checkbox("Osculating orbits", &overlays.osculatingOrbits);
         ImGui::Checkbox("Predicted path", &overlays.predictedPath);
         ImGui::Checkbox("Gravity-well rings", &overlays.gravityRings);
-        ImGui::Checkbox("Hill / SOI / Roche circles", &overlays.hillSoiRoche);
+        ImGui::Checkbox("Hill spheres", &overlays.hill);
+        ImGui::Checkbox("Spheres of influence", &overlays.soi);
+        ImGui::Checkbox("Roche limits", &overlays.roche);
         ImGui::Checkbox("Atmosphere bubbles", &overlays.atmospheres);
+        ImGui::Spacing();
+        ImGui::SetNextItemWidth(150.0f * s);
+        ImGui::SliderFloat("Arrow length (px)", &overlays.arrowLengthPx, 20.0f, 300.0f, "%.0f");
+        tip("Length of the longest velocity or acceleration arrow on screen");
+        ImGui::SetNextItemWidth(150.0f * s);
+        ImGui::Combo("Arrow scaling", &overlays.arrowScaling, "Linear\0Square root\0Logarithmic\0");
+        tip("How the length follows the magnitude");
         ImGui::EndDisabled();
-        if (!overlays.overlaysAvailable) ImGui::TextColored(pal.textDim, "Overlays arrive in a later milestone.");
+        if (!overlays.overlaysAvailable) ImGui::TextColored(pal.textDim, "Overlays are not available here.");
         noteWindowRect();
     }
     ImGui::End();
@@ -288,6 +297,10 @@ void BottomBar::drawSimWindow(RunHost& host, ImVec2 display, float barTop)
         bool fuel = host.infiniteFuel();
         if (ImGui::Checkbox("Infinite fuel", &fuel)) host.setInfiniteFuel(fuel);
         tip("Shuttles never run out of fuel");
+
+        bool anyShuttle = host.slowDownAnyShuttle();
+        if (ImGui::Checkbox("Slow down for any shuttle impact", &anyShuttle)) host.setSlowDownAnyShuttle(anyShuttle);
+        tip("Off: the warp steps down only for the followed shuttle and for bodies about to collide.\nOn: for every shuttle about to hit a body or its air.");
         noteWindowRect();
     }
     ImGui::End();

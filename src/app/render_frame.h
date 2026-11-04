@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include "app/explosion_frame.h"
 
 namespace cosmos {
 namespace app {
@@ -144,6 +145,7 @@ struct RenderFrame {
     std::vector<RenderShuttle> shuttles;
     LineBatch underlay;         // drawn before bodies (trails, orbits, Hill/SOI circles; plan 9.4 steps 4-5)
     LineBatch overlay;          // drawn after shuttles (velocity/acceleration arrows; plan 9.4 step 9)
+    ExplosionFrame explosions;  // fragments and sparks (plan 9.4 step 8, 9.7); filled by ExplosionSystem::update, drawn by Renderer::drawExplosions
 
     // M7 passes. Each stays empty when its toggle is off; the renderer then skips the pass.
     std::vector<RenderWell> wells;              // gravity-well rings (step 2). One entry per source body
@@ -164,6 +166,7 @@ struct RenderFrame {
         wells.clear();
         atmospheres.clear();
         circles.clear();
+        explosions.clear();
     }
 };
 

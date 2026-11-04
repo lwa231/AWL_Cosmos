@@ -121,5 +121,25 @@ unsigned int buildProgram(const std::string& dir, const std::string& vertFile, c
     return program;
 }
 
+unsigned int buildComputeProgram(const std::string& dir, const std::string& file)
+{
+    const unsigned int cs = load(GL_COMPUTE_SHADER, dir, file);
+    if (!cs) return 0;
+    unsigned int program = glCreateProgram();
+    glAttachShader(program, cs);
+    glLinkProgram(program);
+    int ok = 0;
+    glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[2048];
+        glGetProgramInfoLog(program, sizeof(log), nullptr, log);
+        std::cerr << "Shader link failed (" << file << "):\n" << log << "\n";
+        glDeleteProgram(program);
+        program = 0;
+    }
+    glDeleteShader(cs);
+    return program;
+}
+
 } // namespace render
 } // namespace cosmos
