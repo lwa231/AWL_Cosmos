@@ -19,7 +19,7 @@ struct FrameUbo {
     float proj[16];       // mat4, column major: centre-origin pixels -> clip
     float viewport[4];    // width, height, 1/width, 1/height
     float scale[4];       // metres per pixel, pixels per metre, time, minimum body diameter in pixels
-    std::uint32_t counts[4];   // bodies, lights, shuttles, 0
+    std::uint32_t counts[4];   // bodies, lights, shuttles, gravity-well sources
     float shuttle[4];     // hull length in metres, minimum hull length in pixels, 0, 0
 };
 static_assert(sizeof(FrameUbo) == 64 + 16 * 4, "FrameUbo must match the std140 block");
@@ -48,6 +48,18 @@ struct SegmentGpu {       // 64 bytes
     std::int32_t prev, next;   // neighbouring segment indices within the same buffer (mitred joint), or -1
     std::int32_t pad;
 };
+struct WellGpu {          // 16 bytes (shaders/well.frag)
+    float x, y, radius, mu;
+};
+struct AtmosphereGpu {    // 32 bytes (shaders/atmosphere.*)
+    float x, y, radius, top;
+    float scaleHeight, r, g, b;
+};
+struct CircleGpu {        // 16 bytes (shaders/circle.vert)
+    float x, y, radius;
+    std::uint32_t kind;
+};
+static_assert(sizeof(WellGpu) == 16 && sizeof(AtmosphereGpu) == 32 && sizeof(CircleGpu) == 16, "M7 pass layouts");
 static_assert(sizeof(BodyGpu) == 32 && sizeof(LightGpu) == 32, "body/light layout");
 static_assert(sizeof(ShuttleGpu) == 64 && sizeof(SegmentGpu) == 64, "shuttle/segment layout");
 
@@ -60,6 +72,9 @@ constexpr GLuint kBindBodies = 0;
 constexpr GLuint kBindLights = 1;
 constexpr GLuint kBindShuttles = 2;
 constexpr GLuint kBindSegments = 3;
+constexpr GLuint kBindWells = 4;
+constexpr GLuint kBindAtmospheres = 5;
+constexpr GLuint kBindCircles = 6;
 
 constexpr std::size_t kShuttleVertices = 6;   // per instance; the draw has 2N instances: N flame quads, then N hulls
 constexpr float kTimeWrapSeconds = 3600.0f;   // keeps the float time precise; flicker is visual only
@@ -89,6 +104,9 @@ public:
     void shutdown() override;
     void resize(int w, int h) override;
     void beginFrame(const app::RenderFrame& frame) override;
+    void drawGravityWells() override;
+    void drawAtmospheres() override;
+    void drawCircles() override;
     void drawBodies() override;
     void drawShuttles() override;
     void drawLines(LinePass pass) override;
@@ -110,6 +128,10 @@ private:
     bool initialised_ = false;
     bool debugCallbackSet_ = false;
     unsigned int progBodies_ = 0, progShuttles_ = 0, progLines_ = 0;
+    unsigned int progWells_ = 0, progAtmospheres_ = 0, progCircles_ = 0;
+    unsigned int wellQuery_[2] = {0, 0};     // GL_TIME_ELAPSED of the ring pass, read back a frame or two late
+    bool wellQueryPending_[2] = {false, false};
+    int wellQueryNext_ = 0;
     unsigned int vao_ = 0;     // core profile needs a VAO bound even though all data is pulled from storage buffers
     unsigned int frameUbo_ = 0;
     StreamArena arena_;
@@ -117,7 +139,7 @@ private:
     const app::RenderFrame* frame_ = nullptr;
     bool inFrame_ = false;
     int width_ = 0, height_ = 0;
-    Range bodies_, lights_, shuttles_, lines_[2];
+    Range bodies_, lights_, shuttles_, lines_[2], wells_, atmospheres_, circles_;
     RenderStats stats_;
     RenderTotals totals_;
     std::uint32_t lastStalls_ = 0;   // arena stall count already folded into totals_
@@ -145,7 +167,10 @@ bool GlRenderer::init(const RendererConfig& config)
     progBodies_ = buildProgram(config.shaderDir, "body.vert", "body.frag");
     progShuttles_ = buildProgram(config.shaderDir, "shuttle.vert", "shuttle.frag");
     progLines_ = buildProgram(config.shaderDir, "line.vert", "line.frag");
-    if (!progBodies_ || !progShuttles_ || !progLines_) {
+    progWells_ = buildProgram(config.shaderDir, "well.vert", "well.frag");
+    progAtmospheres_ = buildProgram(config.shaderDir, "atmosphere.vert", "atmosphere.frag");
+    progCircles_ = buildProgram(config.shaderDir, "circle.vert", "circle.frag");
+    if (!progBodies_ || !progShuttles_ || !progLines_ || !progWells_ || !progAtmospheres_ || !progCircles_) {
         shutdown();
         return false;
     }
@@ -158,6 +183,7 @@ bool GlRenderer::init(const RendererConfig& config)
         std::cerr << "Renderer: buffer offset alignment " << alignment_ << " is larger than expected\n";
     }
 
+    glCreateQueries(GL_TIME_ELAPSED, 2, wellQuery_);
     glCreateVertexArrays(1, &vao_);
     // Starts at 1 MiB per segment (3 MiB mapped); grows by doubling if a frame needs more.
     if (!arena_.init(std::size_t(1) << 20)) {
@@ -179,7 +205,13 @@ void GlRenderer::shutdown()
     if (progBodies_) glDeleteProgram(progBodies_);
     if (progShuttles_) glDeleteProgram(progShuttles_);
     if (progLines_) glDeleteProgram(progLines_);
-    vao_ = progBodies_ = progShuttles_ = progLines_ = 0;
+    if (progWells_) glDeleteProgram(progWells_);
+    if (progAtmospheres_) glDeleteProgram(progAtmospheres_);
+    if (progCircles_) glDeleteProgram(progCircles_);
+    if (wellQuery_[0]) glDeleteQueries(2, wellQuery_);
+    wellQuery_[0] = wellQuery_[1] = 0;
+    wellQueryPending_[0] = wellQueryPending_[1] = false;
+    vao_ = progBodies_ = progShuttles_ = progLines_ = progWells_ = progAtmospheres_ = progCircles_ = 0;
     initialised_ = false;
     inFrame_ = false;
     frame_ = nullptr;
@@ -233,6 +265,9 @@ void GlRenderer::beginFrame(const app::RenderFrame& frame)
     const std::size_t nShuttles = frame.shuttles.size();
     const std::size_t nUnder = frame.underlay.segmentCount();
     const std::size_t nOver = frame.overlay.segmentCount();
+    const std::size_t nWells = frame.wells.size();
+    const std::size_t nAtmos = frame.atmospheres.size();
+    const std::size_t nCircles = frame.circles.size();
 
     const std::size_t szFrame = sizeof(FrameUbo);
     const std::size_t szBodies = std::max<std::size_t>(nBodies, 1) * sizeof(BodyGpu);       // >= 1 element so every binding is valid
@@ -240,8 +275,12 @@ void GlRenderer::beginFrame(const app::RenderFrame& frame)
     const std::size_t szShuttles = std::max<std::size_t>(nShuttles, 1) * sizeof(ShuttleGpu);
     const std::size_t szUnder = std::max<std::size_t>(nUnder, 1) * sizeof(SegmentGpu);
     const std::size_t szOver = std::max<std::size_t>(nOver, 1) * sizeof(SegmentGpu);
+    const std::size_t szWells = std::max<std::size_t>(nWells, 1) * sizeof(WellGpu);
+    const std::size_t szAtmos = std::max<std::size_t>(nAtmos, 1) * sizeof(AtmosphereGpu);
+    const std::size_t szCircles = std::max<std::size_t>(nCircles, 1) * sizeof(CircleGpu);
     const std::size_t total = roundUp(szFrame, alignment_) + roundUp(szBodies, alignment_) + roundUp(szLights, alignment_) +
-                              roundUp(szShuttles, alignment_) + roundUp(szUnder, alignment_) + roundUp(szOver, alignment_);
+                              roundUp(szShuttles, alignment_) + roundUp(szUnder, alignment_) + roundUp(szOver, alignment_) +
+                              roundUp(szWells, alignment_) + roundUp(szAtmos, alignment_) + roundUp(szCircles, alignment_);
 
     if (!arena_.begin(total)) {
         std::cerr << "Renderer: cannot acquire a streaming segment\n";
@@ -257,7 +296,10 @@ void GlRenderer::beginFrame(const app::RenderFrame& frame)
     ShuttleGpu* shuttleOut = static_cast<ShuttleGpu*>(arena_.alloc(szShuttles, alignment_, &shuttles_.offset));
     SegmentGpu* underOut = static_cast<SegmentGpu*>(arena_.alloc(szUnder, alignment_, &lines_[0].offset));
     SegmentGpu* overOut = static_cast<SegmentGpu*>(arena_.alloc(szOver, alignment_, &lines_[1].offset));
-    if (!ubo || !bodyOut || !lightOut || !shuttleOut || !underOut || !overOut) {
+    WellGpu* wellOut = static_cast<WellGpu*>(arena_.alloc(szWells, alignment_, &wells_.offset));
+    AtmosphereGpu* atmosOut = static_cast<AtmosphereGpu*>(arena_.alloc(szAtmos, alignment_, &atmospheres_.offset));
+    CircleGpu* circleOut = static_cast<CircleGpu*>(arena_.alloc(szCircles, alignment_, &circles_.offset));
+    if (!ubo || !bodyOut || !lightOut || !shuttleOut || !underOut || !overOut || !wellOut || !atmosOut || !circleOut) {
         std::cerr << "Renderer: streaming segment exhausted (internal sizing error)\n";
         return;
     }
@@ -266,6 +308,9 @@ void GlRenderer::beginFrame(const app::RenderFrame& frame)
     shuttles_.bytes = szShuttles;   shuttles_.count = static_cast<std::uint32_t>(nShuttles);
     lines_[0].bytes = szUnder;      lines_[0].count = static_cast<std::uint32_t>(nUnder);
     lines_[1].bytes = szOver;       lines_[1].count = static_cast<std::uint32_t>(nOver);
+    wells_.bytes = szWells;         wells_.count = static_cast<std::uint32_t>(nWells);
+    atmospheres_.bytes = szAtmos;   atmospheres_.count = static_cast<std::uint32_t>(nAtmos);
+    circles_.bytes = szCircles;     circles_.count = static_cast<std::uint32_t>(nCircles);
 
     // ---- fill (sequential writes only: the mapped memory is write-combined) ----
     const float w = static_cast<float>(std::max(width_, 1));
@@ -281,7 +326,7 @@ void GlRenderer::beginFrame(const app::RenderFrame& frame)
     u.scale[1] = 1.0f / mpp;
     u.scale[2] = static_cast<float>(std::fmod(frame.time, static_cast<double>(kTimeWrapSeconds)));
     u.scale[3] = frame.bodyMinPixels;
-    u.counts[0] = bodies_.count; u.counts[1] = lights_.count; u.counts[2] = shuttles_.count;
+    u.counts[0] = bodies_.count; u.counts[1] = lights_.count; u.counts[2] = shuttles_.count; u.counts[3] = wells_.count;
     u.shuttle[0] = frame.shuttleLengthMetres;
     u.shuttle[1] = frame.shuttleMinPixels;
     std::memcpy(ubo, &u, sizeof(u));
@@ -318,7 +363,33 @@ void GlRenderer::beginFrame(const app::RenderFrame& frame)
     fillLines(frame.overlay, overOut);
     if (nOver == 0) std::memset(overOut, 0, sizeof(SegmentGpu));
 
+    for (const app::RenderWell& w : frame.wells) {
+        WellGpu g;
+        g.x = w.x; g.y = w.y; g.radius = w.radius; g.mu = w.mu;
+        *wellOut++ = g;
+    }
+    if (nWells == 0) std::memset(wellOut, 0, sizeof(WellGpu));
+
+    for (const app::RenderAtmosphere& a : frame.atmospheres) {
+        AtmosphereGpu g;
+        g.x = a.x; g.y = a.y; g.radius = a.radius; g.top = a.top;
+        g.scaleHeight = a.scaleHeight > 0.0f ? a.scaleHeight : 1.0f;
+        g.r = a.tint.r; g.g = a.tint.g; g.b = a.tint.b;
+        *atmosOut++ = g;
+    }
+    if (nAtmos == 0) std::memset(atmosOut, 0, sizeof(AtmosphereGpu));
+
+    for (const app::RenderCircle& c : frame.circles) {
+        CircleGpu g;
+        g.x = c.x; g.y = c.y; g.radius = c.radius; g.kind = static_cast<std::uint32_t>(c.kind);
+        *circleOut++ = g;
+    }
+    if (nCircles == 0) std::memset(circleOut, 0, sizeof(CircleGpu));
+
     stats_.bodyInstances = bodies_.count;
+    stats_.wellSources = wells_.count;
+    stats_.atmosphereInstances = atmospheres_.count;
+    stats_.circleInstances = circles_.count;
     stats_.lightCount = lights_.count;
     stats_.shuttleInstances = shuttles_.count;
     stats_.lineSegments = lines_[0].count + lines_[1].count;
@@ -338,7 +409,62 @@ void GlRenderer::beginFrame(const app::RenderFrame& frame)
     glBindBufferRange(GL_SHADER_STORAGE_BUFFER, kBindBodies, arena_.buffer(), static_cast<GLintptr>(bodies_.offset), static_cast<GLsizeiptr>(bodies_.bytes));
     glBindBufferRange(GL_SHADER_STORAGE_BUFFER, kBindLights, arena_.buffer(), static_cast<GLintptr>(lights_.offset), static_cast<GLsizeiptr>(lights_.bytes));
     glBindBufferRange(GL_SHADER_STORAGE_BUFFER, kBindShuttles, arena_.buffer(), static_cast<GLintptr>(shuttles_.offset), static_cast<GLsizeiptr>(shuttles_.bytes));
+    glBindBufferRange(GL_SHADER_STORAGE_BUFFER, kBindWells, arena_.buffer(), static_cast<GLintptr>(wells_.offset), static_cast<GLsizeiptr>(wells_.bytes));
+    glBindBufferRange(GL_SHADER_STORAGE_BUFFER, kBindAtmospheres, arena_.buffer(), static_cast<GLintptr>(atmospheres_.offset), static_cast<GLsizeiptr>(atmospheres_.bytes));
+    glBindBufferRange(GL_SHADER_STORAGE_BUFFER, kBindCircles, arena_.buffer(), static_cast<GLintptr>(circles_.offset), static_cast<GLsizeiptr>(circles_.bytes));
     inFrame_ = true;
+}
+
+void GlRenderer::drawGravityWells()
+{
+    if (!inFrame_ || wells_.count == 0 || !frame_) return;
+    const app::WellStyle& st = frame_->wellStyle;
+    glUseProgram(progWells_);
+    glUniform4f(0, st.bandsPerUnit, st.rampLow, st.rampHigh, st.lineAlpha);
+    glUniform3f(1, frame_->clearColour[0], frame_->clearColour[1], frame_->clearColour[2]);
+    glUniform3f(2, st.tint[0], st.tint[1], st.tint[2]);
+    glUniform3f(3, st.line[0], st.line[1], st.line[2]);
+
+    // Time the pass with two alternating queries. The older one is read only when the GPU has finished it, so this never stalls.
+    const int q = wellQueryNext_;
+    if (wellQueryPending_[q]) {
+        GLint ready = 0;
+        glGetQueryObjectiv(wellQuery_[q], GL_QUERY_RESULT_AVAILABLE, &ready);
+        if (ready) {
+            GLuint64 ns = 0;
+            glGetQueryObjectui64v(wellQuery_[q], GL_QUERY_RESULT, &ns);
+            totals_.wellsGpuMsLast = static_cast<double>(ns) * 1e-6;
+            totals_.wellsGpuMsSum += totals_.wellsGpuMsLast;
+            ++totals_.wellsGpuSamples;
+            wellQueryPending_[q] = false;
+        }
+    }
+    const bool timed = !wellQueryPending_[q];
+    if (timed) glBeginQuery(GL_TIME_ELAPSED, wellQuery_[q]);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    if (timed) {
+        glEndQuery(GL_TIME_ELAPSED);
+        wellQueryPending_[q] = true;
+    }
+    wellQueryNext_ = 1 - q;
+    ++stats_.drawCalls;
+}
+
+void GlRenderer::drawAtmospheres()
+{
+    if (!inFrame_ || atmospheres_.count == 0 || !frame_) return;
+    glUseProgram(progAtmospheres_);
+    glUniform2f(0, frame_->atmosphereAlpha, frame_->atmospherePower);
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(atmospheres_.count));
+    ++stats_.drawCalls;
+}
+
+void GlRenderer::drawCircles()
+{
+    if (!inFrame_ || circles_.count == 0) return;
+    glUseProgram(progCircles_);
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(circles_.count));
+    ++stats_.drawCalls;
 }
 
 void GlRenderer::drawBodies()

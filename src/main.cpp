@@ -22,6 +22,7 @@
 #include "app/bmp_writer.h"
 #include "app/camera.h"
 #include "app/format.h"
+#include "app/overlay_fill.h"
 #include "app/palette.h"
 #include "app/presets.h"
 #include "app/render_frame.h"
@@ -87,6 +88,9 @@ struct Options {
     // which starts at the window centre).
     struct Scripted { int frame = 0; bool scroll = false; int key = 0; int mods = 0; double steps = 0.0; };
     std::vector<Scripted> script;
+    // M7 DEV WIRING (shaders agent): --dev-overlays wells,atmo,hill,soi,roche feeds and draws those passes without the view
+    // window toggles, for screenshots. The integrator replaces this with the ViewOverlays checkboxes.
+    std::string devOverlays;
 };
 
 // Parses "KEY@FRAME" / "STEPS@FRAME" for --press / --scroll. Returns false on a malformed or unknown key.
@@ -155,6 +159,7 @@ bool parseArgs(int argc, char** argv, Options& o)
         }
         else if (a == "--no-vsync") o.vsync = false;
         else if (a == "--gl-debug") o.glDebug = true;
+        else if (a == "--dev-overlays" && i + 1 < argc) o.devOverlays = argv[++i];
         else {
             std::cerr << "Unknown or incomplete option: " << a << "\n"
                       << "Usage: AWL_Cosmos [--scene file.json] [--warp X] [--follow NAME] [--mpp X] [--size W H] [--frames N]\n"
@@ -1260,8 +1265,21 @@ int run(const Options& opt)
             if (app.fbW > 0 && app.fbH > 0) {
                 frame.time = opt.fixedDt > 0.0 ? static_cast<double>(rs.frames) * opt.fixedDt : frameStart;   // repeatable flicker with --fixed-dt
                 fillFrame(app, frame);
+                // M7 DEV WIRING: see Options::devOverlays. Circles' radii are recomputed every frame (O(n^3) hierarchy; fine for a
+                // handful of bodies, the integrator should throttle it).
+                if (!opt.devOverlays.empty()) {
+                    auto has = [&opt](const char* w) { return opt.devOverlays.find(w) != std::string::npos; };
+                    if (has("wells")) appendWells(frame, app.state().bodies);
+                    if (has("atmo")) appendAtmospheres(frame, app.state().bodies);
+                    CircleSet cs;
+                    cs.hill = has("hill"); cs.soi = has("soi"); cs.roche = has("roche");
+                    if (cs.hill || cs.soi || cs.roche) appendCircles(frame, computeBodyRadii(app.state().bodies), cs);
+                }
                 renderer->beginFrame(frame);
+                renderer->drawGravityWells();
+                renderer->drawAtmospheres();
                 renderer->drawLines(render::LinePass::Underlay);
+                renderer->drawCircles();
                 renderer->drawBodies();
                 renderer->drawShuttles();
                 renderer->drawLines(render::LinePass::Overlay);
@@ -1327,6 +1345,9 @@ int run(const Options& opt)
         const render::RenderTotals& tot = renderer->totals();
         std::cout << "Last frame: draw calls " << st.drawCalls << " (bodies " << st.bodyInstances << ", shuttles " << st.shuttleInstances
                   << ", line segments " << st.lineSegments << "), lights " << st.lightCount << ", streamed " << st.streamedBytes << " bytes\n";
+        if (tot.wellsGpuSamples > 0)
+            std::cout << "Gravity-well pass GPU time: avg " << tot.wellsGpuMsSum / static_cast<double>(tot.wellsGpuSamples) << " ms over "
+                      << tot.wellsGpuSamples << " samples (last " << tot.wellsGpuMsLast << " ms)\n";
         std::cout << "UI: " << (app.ui.initialised() ? "on" : "off") << ", labels drawn in the last frame " << labelsDrawn
                   << ", UI scale " << app.ui.dpiScale() << (app.ui.fontsLoaded() ? "" : " (fonts missing)") << "\n";
         std::cout << "Totals: frames " << tot.frames << ", GL errors " << tot.glErrors << ", GL warnings " << tot.glWarnings

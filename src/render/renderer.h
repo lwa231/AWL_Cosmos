@@ -3,7 +3,10 @@
 //
 // Per-frame use:
 //     renderer.beginFrame(frame);          // uploads the frame description, clears, binds
-//     renderer.drawLines(LinePass::Underlay);
+//     renderer.drawGravityWells();         // plan 9.4 step 2 (no-op when frame.wells is empty)
+//     renderer.drawAtmospheres();          // step 3 (no-op when frame.atmospheres is empty)
+//     renderer.drawLines(LinePass::Underlay);   // step 4
+//     renderer.drawCircles();              // step 5: Hill / SOI / Roche (no-op when frame.circles is empty)
 //     renderer.drawBodies();
 //     renderer.drawShuttles();
 //     renderer.drawLines(LinePass::Overlay);
@@ -39,6 +42,9 @@ struct RenderStats {
     std::uint32_t lightCount = 0;
     std::uint32_t shuttleInstances = 0;
     std::uint32_t lineSegments = 0;        // quads drawn (strips + loose segments), both passes
+    std::uint32_t wellSources = 0;         // bodies the gravity-well pass summed over (0: pass skipped)
+    std::uint32_t atmosphereInstances = 0;
+    std::uint32_t circleInstances = 0;
     std::uint64_t streamedBytes = 0;       // bytes written into the persistent mapped buffer this frame
 };
 
@@ -49,6 +55,10 @@ struct RenderTotals {
     std::uint64_t glWarnings = 0;          // other non-notification KHR_debug messages
     std::uint32_t fenceStalls = 0;         // frames that had to wait for the GPU before reusing a streaming segment
     std::uint32_t arenaGrowths = 0;        // times the streaming buffer was reallocated bigger
+    // GPU time of the gravity-well pass (GL_TIME_ELAPSED query read back one or two frames late, never stalling)
+    double wellsGpuMsLast = 0.0;
+    double wellsGpuMsSum = 0.0;
+    std::uint64_t wellsGpuSamples = 0;
 };
 
 enum class LinePass { Underlay, Overlay };
@@ -62,6 +72,9 @@ public:
     virtual void resize(int widthPx, int heightPx) = 0;
 
     virtual void beginFrame(const app::RenderFrame& frame) = 0;
+    virtual void drawGravityWells() = 0;                    // plan 9.4 step 2: full-screen potential bands + depth tint
+    virtual void drawAtmospheres() = 0;                     // plan 9.4 step 3: radial gradient discs from R to R + top
+    virtual void drawCircles() = 0;                         // plan 9.4 step 5: Hill / SOI / Roche outlines
     virtual void drawBodies() = 0;                          // plan 9.4 step 6
     virtual void drawShuttles() = 0;                        // plan 9.4 step 7 (hulls + flames, one draw call)
     virtual void drawLines(LinePass pass) = 0;              // streamed line batch (underlay: step 4/5, overlay: step 9)
