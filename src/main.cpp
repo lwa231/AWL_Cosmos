@@ -141,23 +141,48 @@ static int run()
 
     //Setup Objects on the screen
     //           x,    y,  mass,radius,kind,r,   g,     b,    vx, vy
-       //Pseudo galaxy: black central mass + dust rings
-    const int    DUST   = 350;      // Debug build: keep ~300.  Release build: up to ~1000
+        // Milky-Way-like galaxy: black core, warm bar/bulge, two main arms, two faint minor arms
     const double M_CORE = 120.0;
-    const double RINGS[7] = { 1.5, 4.5, 7.5, 11.0, 15.0, 19.5, 25.0 };
+    const double PI     = 3.14159265358979;
+    const double BAR    = 0.5;      // bar angle (rad)
+    const double PITCH  = 0.23;     // tan(13 deg): how tightly the arms wind
+    auto frac = [](double x) { return x - std::floor(x); };          // cheap deterministic "random"
+    auto addDust = [&](double r, double th, double size, float cr, float cg, float cb) {
+        double v = std::sqrt(M_CORE * r * r / std::pow(r * r + 0.01, 1.5));   // circular speed incl. softening
+        sim.InitBody(r * std::cos(th), r * std::sin(th), 1e-6, size, BodyKind::Star,
+                     cr, cg, cb, v * std::sin(th), -v * std::cos(th));        // clockwise, so arms trail
+    };
 
-    sim.InitBody(0, 0, M_CORE, 1.2, BodyKind::Star, 0.0f, 0.0f, 0.0f, 0, 0);   // the black core
+    sim.InitBody(0, 0, M_CORE, 0.6, BodyKind::Star, 0.0f, 0.0f, 0.0f, 0, 0);  // central black hole
 
-    for (int i = 0; i < DUST; ++i) {
-        double jitter = (std::fmod(i * 0.6180339887, 1.0) - 0.5) * 1.2;    // spreads each ring ±0.6
-        double r  = RINGS[i % 7] + jitter;
-        double th = i * 2.39996323;                                         // golden angle: even spread
-        double v  = std::sqrt(M_CORE * r * r / std::pow(r * r + 0.01, 1.5)); // circular speed incl. softening
-        float  t  = (float)((r - 3.0) / 24.0);                              // 0 inner .. 1 outer
-        sim.InitBody(r * std::cos(th), r * std::sin(th), 1e-6, 0.08, BodyKind::Star,
-                     1.0f - 0.4f * t, 0.85f - 0.1f * t, 0.6f + 0.4f * t,    // warm inner -> blue outer
-                     -v * std::sin(th), v * std::cos(th));
+    // Bulge / bar: 60 warm particles at r = 3..5.5, bunched toward the bar's two ends
+    for (int i = 0; i < 60; ++i) {
+        double r  = 3.0 + 2.5 * frac(i * 0.6180339887);
+        double th = BAR + (i % 2) * PI + (frac(i * 0.7548776662) - 0.5) * 1.6;
+        addDust(r, th, 0.11, 1.0f, 0.88f, 0.62f);
     }
+
+    // Two main arms: 110 particles each on a log spiral r = 5 e^(PITCH*phi), out to ~27
+    for (int arm = 0; arm < 2; ++arm)
+        for (int i = 0; i < 110; ++i) {
+            double phi    = 7.3 * (i + 0.5) / 110.0;
+            double r      = 5.0 * std::exp(PITCH * phi);
+            double spread = (frac(i * 0.6180339887 + arm * 0.5) - 0.5) * (0.4 + 0.06 * r);  // arms widen outward
+            double th     = BAR + arm * PI + phi + spread / r;
+            r += spread * 0.5;
+            if (i % 7 == 3) addDust(r, th, 0.11, 1.0f, 0.55f, 0.70f);   // pink star-forming knots
+            else            addDust(r, th, 0.08, 0.72f, 0.80f, 1.0f);   // blue-white arm dust
+        }
+
+    // Two faint minor arms: 40 particles each, rotated 90 deg from the main arms
+    for (int arm = 0; arm < 2; ++arm)
+        for (int i = 0; i < 40; ++i) {
+            double phi = 6.0 * (i + 0.5) / 40.0;
+            double r   = 6.0 * std::exp(PITCH * phi);
+            double th  = BAR + PI / 2 + arm * PI + phi + (frac(i * 0.7548776662) - 0.5) * 0.25;
+            addDust(r, th, 0.06, 0.50f, 0.55f, 0.68f);
+        }
+
     sim.ZeroMomentum();
 
 
