@@ -1373,14 +1373,13 @@ int run(const Options& opt)
             if (advanced) {
                 for (const Event& e : app.rc.driver().dueEvents()) {
                     app.overlays.onEvent(e);
-                    // The followed shuttle crashed: follow the body it hit (keeping the view), so the explosion stays on screen.
+                    // The followed shuttle crashed: follow the body it hit, so the explosion (on its surface) stays on screen.
+                    // Snap to the body rather than keep the view: the camera centre is from the previous frame, which at high
+                    // warp is a whole frame of orbital motion away (~50,000 km at 1e5x) and would leave the body off-screen.
                     if (e.type == EventType::ShuttleDestroyed && e.other != 0 && app.camera.following().kind == TargetKind::Shuttle &&
-                        app.camera.following().id == e.id) {
-                        const auto it = app.bodyIndex.find(e.other);
-                        if (it != app.bodyIndex.end() && it->second < app.state().bodies.size()) {
-                            app.camera.followKeepingView(TargetKind::Body, e.other, app.state().bodies[it->second].r);
-                            app.lastFollowedBody = e.other;
-                        }
+                        app.camera.following().id == e.id && app.bodyIndex.count(e.other)) {
+                        app.camera.follow(TargetKind::Body, e.other);
+                        app.lastFollowedBody = e.other;
                     }
                 }
                 app.explosions.handleEvents(app.rc.driver().dueEvents(), app.state(), app.rc.driver().sim());
