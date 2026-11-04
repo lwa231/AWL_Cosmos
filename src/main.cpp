@@ -111,6 +111,7 @@ struct Options {
     double benchFuel = kBenchDefaultFuel_kg;
     int benchWarmup = 120;
     std::string perfCsv;
+    double benchPaceFps = 0.0;        // --bench-pace FPS: every frame advances the simulation by 1/FPS of real time (as at that frame rate), however fast frames are drawn
     std::string benchLabel;
     std::string benchControllers;     // --bench-controllers coast,prograde,retrograde,wander: the autopilots the benchmark shuttles cycle through
 };
@@ -192,6 +193,7 @@ bool parseArgs(int argc, char** argv, Options& o)
         else if (a == "--perf-csv" && i + 1 < argc) o.perfCsv = argv[++i];
         else if (a == "--bench-controllers" && i + 1 < argc) o.benchControllers = argv[++i];
         else if (a == "--bench-label" && i + 1 < argc) o.benchLabel = argv[++i];
+        else if (a == "--bench-pace" && i + 1 < argc) o.benchPaceFps = std::atof(argv[++i]);
         else if (a == "--gl-debug") o.glDebug = true;
         else if (a == "--overlays" && i + 1 < argc) o.overlays = argv[++i];
         else if (a == "--shot" && i + 1 < argc) {
@@ -210,7 +212,7 @@ bool parseArgs(int argc, char** argv, Options& o)
                       << "                  [--press KEY@FRAME]... [--scroll STEPS@FRAME]...\n"
                       << "                  [--overlays vel,acc,trails,orbits,path,wells,hill,soi,roche,atmo|all] [--shot FILE.bmp@FRAME]...\n"
                       << "                  [--bench-shuttles N] [--bench-fuel KG] [--bench-warmup FRAMES] [--bench-label TEXT]"
-                      << " [--bench-controllers LIST] [--perf-csv FILE]\n";
+                      << " [--bench-controllers LIST] [--bench-pace FPS] [--perf-csv FILE]\n";
             return false;
         }
     }
@@ -1363,7 +1365,7 @@ int run(const Options& opt)
 
         while (!glfwWindowShouldClose(window) && !app.quit) {
             const double frameStart = glfwGetTime();
-            const double realDt = opt.fixedDt > 0.0 ? opt.fixedDt : frameStart - lastTime;
+            const double realDt = opt.fixedDt > 0.0 ? opt.fixedDt : (opt.benchPaceFps > 0.0 ? 1.0 / opt.benchPaceFps : frameStart - lastTime);
             lastTime = frameStart;
             if (app.dirty) {
                 renderer->resize(app.fbW, app.fbH);
