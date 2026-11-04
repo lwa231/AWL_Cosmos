@@ -218,6 +218,15 @@ TEST_SUITE("hierarchy")
             CHECK(parent == Domus);
             CHECK(parent < n);
         }
+        // The table version chooses the same parent for every point
+        HillTable table;
+        buildHillTable(h, table);
+        for (double dist : {2.1e5, 6.0e5, 1.5e6, 1.0e7, 1.0e8, 3.0e9}) {
+            for (int who = 0; who < n; ++who) {
+                const Vec3 p = s.r[who] + Vec3{dist, 0.3 * dist, 0.0};
+                CHECK(shuttleParent(h, table, p) == shuttleParent(h, p));
+            }
+        }
         // The same ordering on the comparison itself
         const ParentCandidate small{1.0e6, false, 3, 5.0e5}, big{1.0e8, true, 9, 1.0e5};
         CHECK(betterParent(small, big));

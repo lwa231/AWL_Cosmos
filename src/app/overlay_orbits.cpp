@@ -32,19 +32,51 @@ bool buildOrbitCurve(const Elements& el, double rCap, std::size_t segments, Orbi
         return Vec3{r * std::cos(phi), r * std::sin(phi), 0.0};
     };
 
-    out.points.reserve(segments + 1);
-    for (std::size_t i = 0; i <= segments; ++i) {
+    // The polyline is symmetric about the periapsis axis (nu -> -nu gives the same r), so one cos and one sin of nu serve a
+    // pair of points, and the rotation by omega is the angle-addition formula: a point costs half a transcendental call instead
+    // of three (the orbits were a large share of the line-geometry cost of a frame with 200 shuttles). Results agree with the
+    // direct formula to rounding.
+    const double cw = std::cos(el.omega), sw = std::sin(el.omega);
+    out.points.resize(segments + 1);
+    auto put = [&](std::size_t i, double r, double cn, double sn) {
+        // phi = omega + sgn * nu: cos phi = cw cn - sgn sw sn, sin phi = sw cn + sgn cw sn
+        out.points[i] = Vec3{r * (cw * cn - sgn * sw * sn), r * (sw * cn + sgn * cw * sn), 0.0};
+    };
+    // cos and sin of nu advance by a rotation of the constant step between exact evaluations every kResync points (the rotation
+    // error grows by about 1e-16 a step, so it stays below 2e-15 and the polyline is the same to well under a pixel at any zoom).
+    constexpr std::size_t kResync = 16;
+    const double dnu = 2.0 * nuMax / static_cast<double>(segments);
+    const double cd = std::cos(dnu), sd = std::sin(dnu);
+    double cn = 1.0, sn = 0.0;
+    for (std::size_t i = 0; i * 2 <= segments; ++i) {
         // nu = -nuMax + 2 nuMax i / n, with the middle point exactly 0 (periapsis) and the ends exactly +-nuMax.
-        const double f = static_cast<double>(i) / static_cast<double>(segments);
-        const double nu = i == segments ? nuMax : (i * 2 == segments ? 0.0 : -nuMax + 2.0 * nuMax * f);
-        const Vec3 p = at(nu);
-        if (!std::isfinite(p.x) || !std::isfinite(p.y)) {
+        if (i * 2 == segments) {
+            cn = 1.0;
+            sn = 0.0;
+        } else if (i % kResync == 0) {
+            const double f = static_cast<double>(i) / static_cast<double>(segments);
+            const double nu = -nuMax + 2.0 * nuMax * f;
+            cn = std::cos(nu);
+            sn = std::sin(nu);
+        } else {
+            const double c2 = cn * cd - sn * sd, s2 = sn * cd + cn * sd;
+            cn = c2;
+            sn = s2;
+        }
+        const double r = el.p / (1.0 + el.e * cn);
+        put(i, r, cn, sn);
+        if (i * 2 != segments) put(segments - i, r, cn, -sn);
+    }
+    double r2max = 0.0;
+    for (const Vec3& p : out.points) {
+        const double r2 = p.x * p.x + p.y * p.y;
+        if (!std::isfinite(r2)) {
             out.points.clear();
             return false;
         }
-        out.points.push_back(p);
-        out.radiusMax = std::max(out.radiusMax, std::hypot(p.x, p.y));
+        r2max = std::max(r2max, r2);
     }
+    out.radiusMax = std::sqrt(r2max);
     if (el.e < 1.0) out.points.back() = out.points.front();   // a closed loop without a seam
     out.closed = el.e < 1.0;
     out.periapsis = at(0.0);

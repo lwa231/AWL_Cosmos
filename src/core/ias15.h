@@ -149,6 +149,15 @@ public:
     double tauAt(double time) const { return (time - tStart_) / dtLast_; }
     std::size_t bodyCount() const { return n_; }
 
+    // Raw dense output of the last accepted step for callers that evaluate it very often (DenseEphemeris): the step-start
+    // x0, v0, a0 (index 3 * body + component), the 7 polynomial coefficients b (index 7 * (3 * body + component) + k) and the
+    // step length. Valid until the next step() or reset().
+    const double* denseX0() const { return xd_.data(); }
+    const double* denseV0() const { return vd_.data(); }
+    const double* denseA0() const { return ad_.data(); }
+    const double* denseB() const { return b_.data(); }
+    double denseDt() const { return dtLast_; }
+
     Vec3 positionOf(std::size_t i, double tau) const;
     Vec3 velocityOf(std::size_t i, double tau) const;
     Vec3 accelerationOf(std::size_t i, double tau) const;

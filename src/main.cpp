@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -19,6 +20,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include "app/bench_scene.h"
 #include "app/bmp_writer.h"
 #include "app/camera.h"
 #include "app/explosions.h"
@@ -26,6 +28,7 @@
 #include "app/overlay_fill.h"
 #include "app/overlays.h"
 #include "app/palette.h"
+#include "app/perf_stats.h"
 #include "app/presets.h"
 #include "app/render_frame.h"
 #include "app/run_control.h"
@@ -34,6 +37,7 @@
 #include "app/units.h"
 #include "core/kinds.h"
 #include "core/scene_json.h"
+#include "core/threadpool.h"
 #include "render/renderer.h"
 #include "ui/bottom_bar.h"
 #include "ui/labels.h"
@@ -99,6 +103,17 @@ struct Options {
     // --shot FILE.bmp@FRAME: also write the back buffer at the end of FRAME (several allowed; --screenshot is the last frame)
     struct Shot { int frame = 0; std::string path; };
     std::vector<Shot> shots;
+    // Release benchmark (plan 14 "Performance (M8)"): --bench-shuttles N adds N deterministic shuttles to the loaded scene (see
+    // app/bench_scene.h; combine with --do start@1, --no-vsync, --overlays all and a --follow / --mpp view), --bench-fuel KG
+    // sets their tank, --bench-warmup N frames are left out of the statistics printed at the end (frame time percentiles, the
+    // phases of a frame, the physics and overlay split), --perf-csv FILE writes the per-frame samples.
+    int benchShuttles = 0;
+    double benchFuel = kBenchDefaultFuel_kg;
+    int benchWarmup = 120;
+    std::string perfCsv;
+    double benchPaceFps = 0.0;        // --bench-pace FPS: every frame advances the simulation by 1/FPS of real time (as at that frame rate), however fast frames are drawn
+    std::string benchLabel;
+    std::string benchControllers;     // --bench-controllers coast,prograde,retrograde,wander: the autopilots the benchmark shuttles cycle through
 };
 
 // Parses "KEY@FRAME" / "STEPS@FRAME" for --press / --scroll. Returns false on a malformed or unknown key.
@@ -172,6 +187,13 @@ bool parseArgs(int argc, char** argv, Options& o)
             o.script.push_back(sc);
         }
         else if (a == "--no-vsync") o.vsync = false;
+        else if (a == "--bench-shuttles" && i + 1 < argc) o.benchShuttles = std::atoi(argv[++i]);
+        else if (a == "--bench-fuel" && i + 1 < argc) o.benchFuel = std::atof(argv[++i]);
+        else if (a == "--bench-warmup" && i + 1 < argc) o.benchWarmup = std::atoi(argv[++i]);
+        else if (a == "--perf-csv" && i + 1 < argc) o.perfCsv = argv[++i];
+        else if (a == "--bench-controllers" && i + 1 < argc) o.benchControllers = argv[++i];
+        else if (a == "--bench-label" && i + 1 < argc) o.benchLabel = argv[++i];
+        else if (a == "--bench-pace" && i + 1 < argc) o.benchPaceFps = std::atof(argv[++i]);
         else if (a == "--gl-debug") o.glDebug = true;
         else if (a == "--overlays" && i + 1 < argc) o.overlays = argv[++i];
         else if (a == "--shot" && i + 1 < argc) {
@@ -188,7 +210,9 @@ bool parseArgs(int argc, char** argv, Options& o)
                       << "                  [--click X,Y@FRAME]... [--slow-down-at FRAME] [--do COMMAND@FRAME]...\n"
                       << "                  [--type TEXT@FRAME]... [--enter FRAME]...\n"
                       << "                  [--press KEY@FRAME]... [--scroll STEPS@FRAME]...\n"
-                      << "                  [--overlays vel,acc,trails,orbits,path,wells,hill,soi,roche,atmo|all] [--shot FILE.bmp@FRAME]...\n";
+                      << "                  [--overlays vel,acc,trails,orbits,path,wells,hill,soi,roche,atmo|all] [--shot FILE.bmp@FRAME]...\n"
+                      << "                  [--bench-shuttles N] [--bench-fuel KG] [--bench-warmup FRAMES] [--bench-label TEXT]"
+                      << " [--bench-controllers LIST] [--bench-pace FPS] [--perf-csv FILE]\n";
             return false;
         }
     }
@@ -237,9 +261,11 @@ struct App {
     ui::LabelOptions labelOptions;
     SlowDown slowDown;               // warp step-down for approaching impacts (M7, plan 8)
     ExplosionSystem explosions;      // explosion registry; fills RenderFrame::explosions (M7, plan 9.7)
+    ThreadPool workers;              // frame-building workers (overlay geometry, line upload); the main thread takes part
     OverlayBuilder overlays;         // arrows, trails, osculating orbits, predicted path (M7, plan 9.5)
     RadiiCache radiiCache;           // throttled Hill / SOI / Roche radii for the circles
     double lastStatSimTime = -1.0e300;   // physics time of the last conservation sample
+    double wellsEtcMs = 0.0;         // benchmark: wall time of the wells / atmospheres / circles part of fillOverlays
 
     int winW = 0, winH = 0;          // window size in screen coordinates (cursor units)
     int fbW = 0, fbH = 0;            // framebuffer size in pixels
@@ -508,6 +534,7 @@ void applyPrefs(App& app)
 {
     Simulation& sim = app.rc.driver().sim();
     if (sim.threadCount() != app.threads) sim.setThreadCount(app.threads);
+    if (app.workers.threads() != app.threads) app.workers.resize(app.threads);
     if (sim.controllerTick() != app.controllerTick) sim.setControllerTick(app.controllerTick);
     if (sim.infiniteFuel() != app.infiniteFuel) sim.setInfiniteFuel(app.infiniteFuel);
 }
@@ -793,6 +820,7 @@ void applyOverlaySettings(App& app)
 void fillOverlays(App& app, RenderFrame& frame)
 {
     applyOverlaySettings(app);
+    const double tStart = glfwGetTime();
     const ui::ViewOverlays& v = app.bar.overlays;
     const std::vector<DisplayBody>& bodies = app.state().bodies;
     if (v.gravityRings) appendWells(frame, bodies);
@@ -805,6 +833,7 @@ void fillOverlays(App& app, RenderFrame& frame)
         // The O(n^3) hierarchy is recomputed at 4 Hz, not every frame (RadiiCache).
         appendCircles(frame, app.radiiCache.get(bodies, app.rc.generation(), frame.time), which);
     }
+    app.wellsEtcMs = (glfwGetTime() - tStart) * 1000.0;
     app.overlays.build(app.rc.driver(), app.rc.generation(), OverlayView::fromCamera(app.camera), frame);
 }
 
@@ -1214,6 +1243,26 @@ int run(const Options& opt)
                   << app.rc.editor().scene().shuttles.size() << " shuttles) loaded, " << so.threads << " threads\n";
         for (const std::string& w : app.rc.buildWarnings()) std::cerr << "Scene warning: " << w << "\n";
     }
+    if (opt.benchShuttles > 0) {   // the benchmark fleet, through the editor, then one rebuild of the (stopped) driver
+        std::vector<ControllerKind> mix;
+        for (std::size_t from = 0; from < opt.benchControllers.size();) {
+            std::size_t to = opt.benchControllers.find(',', from);
+            if (to == std::string::npos) to = opt.benchControllers.size();
+            ControllerKind k;
+            if (parseControllerKind(opt.benchControllers.substr(from, to - from), k)) mix.push_back(k);
+            else std::cerr << "--bench-controllers: unknown controller '" << opt.benchControllers.substr(from, to - from) << "'\n";
+            from = to + 1;
+        }
+        const EditResult added = addBenchShuttles(app.rc.editor(), opt.benchShuttles, opt.benchFuel, nullptr, &mix);
+        const EditResult applied = added ? app.rc.applyEdits() : added;
+        if (!applied) {
+            std::cerr << "Cannot add the benchmark shuttles: " << applied.error << "\n";
+            glfwDestroyWindow(window);
+            return 1;
+        }
+        std::cout << "Benchmark: " << opt.benchShuttles << " shuttles added (" << opt.benchFuel << " kg fuel each); scene now has "
+                  << app.rc.editor().scene().shuttles.size() << " shuttles\n";
+    }
     glfwSetWindowUserPointer(window, &app);
     glfwMakeContextCurrent(window);   // before gladLoadGLLoader
     glfwSwapInterval(opt.vsync ? 1 : 0);
@@ -1272,6 +1321,8 @@ int run(const Options& opt)
         if (opt.mpp > 0.0) app.camera.setMetresPerPixel(opt.mpp);
         app.camera.update(app.state().t, app.src);
         applyOverlayFlag(app.bar.overlays, opt.overlays);
+        app.workers.resize(so.threads);
+        app.overlays.setThreadPool(&app.workers);
         app.overlays.setShuttlePalette(&app.palette);
         app.overlays.setPredictorOptions(runOptions.sim);   // the predicted path integrates like the live simulation
 
@@ -1308,10 +1359,13 @@ int run(const Options& opt)
         int framesAtReport = 0;
         double titleSim = 0.0, titleReal = 0.0, achievedRate = 0.0;   // rate readout averaged over the title interval
         std::vector<std::uint8_t> pixels;
+        PerfSeries perf;             // samples of the frames after the warm-up (--bench-warmup)
+        double prevSwapEnd = 0.0;
+        std::uint64_t gpuSamplesSeen = 0;
 
         while (!glfwWindowShouldClose(window) && !app.quit) {
             const double frameStart = glfwGetTime();
-            const double realDt = opt.fixedDt > 0.0 ? opt.fixedDt : frameStart - lastTime;
+            const double realDt = opt.fixedDt > 0.0 ? opt.fixedDt : (opt.benchPaceFps > 0.0 ? 1.0 / opt.benchPaceFps : frameStart - lastTime);
             lastTime = frameStart;
             if (app.dirty) {
                 renderer->resize(app.fbW, app.fbH);
@@ -1347,6 +1401,7 @@ int run(const Options& opt)
             const RunState stateBefore = app.rc.state();
             app.frameNo = static_cast<long long>(rs.frames) + 1;
             const bool advanced = app.rc.advance(realDt);
+            const double tAdvance = glfwGetTime();
             if (stateBefore == RunState::Running && app.rc.state() != RunState::Running)   // the integrator failed: auto-paused
                 app.say(app.rc.lastError().empty() ? std::string("Paused") : app.rc.lastError());
             syncGeneration(app);
@@ -1411,10 +1466,14 @@ int run(const Options& opt)
                 glfwSetWindowTitle(window, buildTitle(app, achievedRate).c_str());
             }
 
+            const double tBook = glfwGetTime();
+            double tFill = tBook, tOverlays = tBook, tExplosions = tBook, tRenderFill = tBook, tRenderDraw = tBook, tUi = tBook;
             if (app.fbW > 0 && app.fbH > 0) {
                 frame.time = opt.fixedDt > 0.0 ? static_cast<double>(rs.frames) * opt.fixedDt : frameStart;   // repeatable flicker with --fixed-dt
                 fillFrame(app, frame);
+                tFill = glfwGetTime();
                 fillOverlays(app, frame);
+                tOverlays = glfwGetTime();
                 app.explosions.update(app.state(), fi.simDelta, fi.frameDt,
                                       [&app](const Vec3& w, float& x, float& y) {
                                           const Camera::Rel r = app.camera.toCameraRelative(w);
@@ -1422,7 +1481,10 @@ int run(const Options& opt)
                                           y = r.y;
                                       },
                                       frame.explosions);
+                tExplosions = glfwGetTime();
+                renderer->gpuFrameBegin();
                 renderer->beginFrame(frame);
+                tRenderFill = glfwGetTime();
                 renderer->drawGravityWells();
                 renderer->drawAtmospheres();
                 renderer->drawLines(render::LinePass::Underlay);
@@ -1432,6 +1494,7 @@ int run(const Options& opt)
                 renderer->drawExplosions();
                 renderer->drawLines(render::LinePass::Overlay);
                 renderer->endFrame();
+                tRenderDraw = glfwGetTime();
 
                 // UI last (plan 9.4 steps 10-11): labels in the foreground draw list, then the ImGui windows
                 if (app.ui.initialised()) {
@@ -1452,6 +1515,8 @@ int run(const Options& opt)
                     labelsDrawn = ui::drawLabels(labelItems, app.labelOptions, app.ui.dpiScale());
                     app.ui.render();
                 }
+                tUi = glfwGetTime();
+                renderer->gpuFrameEnd();
 
                 ++rs.frames;
                 if (rs.frames == 1) rs.wallStart = glfwGetTime();   // the first frame includes shader and buffer warm-up
@@ -1467,8 +1532,40 @@ int run(const Options& opt)
                 if (lastFrame && !opt.screenshot.empty()) shoot(opt.screenshot);
                 if (opt.frames >= 2 && rs.frames == opt.frames - 1 && !opt.screenshotPrev.empty()) shoot(opt.screenshotPrev);
                 if (rs.frames > 1) rs.cpuSum += glfwGetTime() - frameStart;
+                const double cpuEnd = glfwGetTime();
                 glfwSwapBuffers(window);
                 rs.wallEnd = glfwGetTime();
+                // Statistics of the measured frames (after the warm-up); the frame time is swap return to swap return.
+                if (rs.frames > 1 && rs.frames > opt.benchWarmup && prevSwapEnd > 0.0) {
+                    auto msOf = [](double a, double b) { return (b - a) * 1000.0; };
+                    perf.frame.push_back(msOf(prevSwapEnd, rs.wallEnd));
+                    perf.cpuWork.push_back(msOf(frameStart, cpuEnd));
+                    perf.physics.push_back(fi.physicsSeconds * 1000.0);
+                    perf.bodiesIas15.push_back(fi.bodiesSeconds * 1000.0);
+                    perf.shuttlePass.push_back(fi.shuttleSeconds * 1000.0);
+                    perf.driverState.push_back(fi.stateSeconds * 1000.0);
+                    perf.phase[static_cast<std::size_t>(Phase::Advance)].push_back(msOf(frameStart, tAdvance));
+                    perf.phase[static_cast<std::size_t>(Phase::Bookkeeping)].push_back(msOf(tAdvance, tBook));
+                    perf.phase[static_cast<std::size_t>(Phase::FillFrame)].push_back(msOf(tBook, tFill));
+                    perf.phase[static_cast<std::size_t>(Phase::FillOverlays)].push_back(msOf(tFill, tOverlays));
+                    perf.phase[static_cast<std::size_t>(Phase::Explosions)].push_back(msOf(tOverlays, tExplosions));
+                    perf.phase[static_cast<std::size_t>(Phase::RenderFill)].push_back(msOf(tExplosions, tRenderFill));
+                    perf.phase[static_cast<std::size_t>(Phase::RenderDraw)].push_back(msOf(tRenderFill, tRenderDraw));
+                    perf.phase[static_cast<std::size_t>(Phase::Ui)].push_back(msOf(tRenderDraw, tUi));
+                    perf.phase[static_cast<std::size_t>(Phase::Swap)].push_back(msOf(cpuEnd, rs.wallEnd));
+                    perf.phase[static_cast<std::size_t>(Phase::Poll)].push_back(0.0);   // set after glfwPollEvents below
+                    const OverlayStats& ov = app.overlays.stats();
+                    perf.ovTrailRecord.push_back(ov.trailRecordMs);
+                    perf.ovTrailDraw.push_back(ov.trailDrawMs);
+                    perf.ovOrbits.push_back(ov.orbitsMs);
+                    perf.ovPredict.push_back(ov.predictMs);
+                    perf.ovArrows.push_back(ov.arrowsMs);
+                    perf.ovWellsEtc.push_back(app.wellsEtcMs);
+                    const render::RenderTotals& tt = renderer->totals();
+                    perf.gpu.push_back(tt.frameGpuSamples > gpuSamplesSeen ? tt.frameGpuMsLast : (perf.gpu.empty() ? 0.0 : perf.gpu.back()));
+                    gpuSamplesSeen = tt.frameGpuSamples;
+                }
+                prevSwapEnd = rs.wallEnd;
                 if (lastFrame) break;
             }
 
@@ -1478,8 +1575,12 @@ int run(const Options& opt)
                 lastReport = now;
                 framesAtReport = static_cast<int>(rs.frames);
             }
-            if (app.fbW > 0 && app.fbH > 0) glfwPollEvents();
-            else glfwWaitEventsTimeout(0.1);   // minimised: nothing is drawn or swapped, so block instead of spinning a core
+            if (app.fbW > 0 && app.fbH > 0) {
+                const double tPollStart = glfwGetTime();
+                glfwPollEvents();
+                auto& pp = perf.phase[static_cast<std::size_t>(Phase::Poll)];
+                if (!pp.empty() && pp.size() == perf.frame.size()) pp.back() = (glfwGetTime() - tPollStart) * 1000.0;
+            } else glfwWaitEventsTimeout(0.1);   // minimised: nothing is drawn or swapped, so block instead of spinning a core
         }
 
         if (rs.frames > 1) {
@@ -1489,6 +1590,26 @@ int run(const Options& opt)
                       << rs.cpuSum / n * 1000.0 << " ms, physics avg " << rs.physicsSum / static_cast<double>(rs.frames) * 1000.0
                       << " ms max " << rs.physicsMax * 1000.0 << " ms, body steps " << rs.bodySteps << ", physics-behind frames "
                       << rs.behindFrames << ", sim time " << formatSimDate(app.rc.driver().targetTime()) << "\n";
+        }
+        if (!perf.frame.empty()) {
+            std::string label = opt.benchLabel.empty() ? std::string("run") : opt.benchLabel;
+            label += " [" + std::to_string(app.fbW) + "x" + std::to_string(app.fbH) + ", warp " + formatSig(opt.warp, 3) + ", " +
+                     std::to_string(app.rc.driver().sim().shuttles().aliveCount()) + " shuttles alive, " + std::to_string(so.threads) +
+                     " threads, vsync " + (opt.vsync ? "on" : "off") + ", warm-up " + std::to_string(opt.benchWarmup) + "]";
+            std::cout << perfReport(perf, label);
+            const SimulationStats& ss = app.rc.driver().sim().stats();
+            std::cout << "  simulation totals: body steps " << ss.bodySteps << ", shuttle steps " << ss.shuttleSteps << " (rejected "
+                      << ss.shuttleRejects << "), force calls " << ss.shuttleForceCalls << ", controller ticks " << ss.controllerTicks
+                      << ", destroyed " << ss.shuttlesDestroyed << '\n';
+            if (!opt.perfCsv.empty()) {
+                if (FILE* f = std::fopen(opt.perfCsv.c_str(), "wb")) {
+                    const std::string csv = perfCsv(perf);
+                    std::fwrite(csv.data(), 1, csv.size(), f);
+                    std::fclose(f);
+                } else {
+                    std::cerr << "Cannot write " << opt.perfCsv << '\n';
+                }
+            }
         }
         std::cout << "Final readout: " << buildTitle(app, achievedRate) << "\n";
         const render::RenderStats& st = renderer->frameStats();

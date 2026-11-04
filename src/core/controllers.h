@@ -62,6 +62,16 @@ public:
     // (plan 6.4: a tick that leaves the command unchanged is not a step boundary). The default asks for every tick.
     // The answer may depend only on obs (computed right after update(obs)), never on hidden mutable state.
     virtual std::int64_t nextTick(const ShuttleObservation& obs) const { return obs.tick + 1; }
+
+    // Opt-in to cheaper steps for a shuttle that cannot thrust any more (finite fuel, tank empty and FuelEmpty reported).
+    // Return true only if, for such a shuttle, update() reads nothing but shuttleId, tick, t_sim, controllerTick_s, heading,
+    // spin, the shuttle's constants (masses, thrust, torque, inertia, infiniteFuel) and `command`, and nextTick() likewise:
+    // never position, velocity or the parent. Then a tick can only change the reaction-wheel torque (the throttle has no
+    // effect without fuel), which moves the hull but not the trajectory, so the propagator does not end a gravity step at the
+    // tick: it integrates the trajectory in the steps the error control wants and advances heading and spin exactly through
+    // the ticks inside each step (every tick still calls update(), with position and velocity of the START of the step and no
+    // parent). The default is false (every tick is a step boundary, as for a state-dependent controller).
+    virtual bool rotationOnlyWhenDry() const { return false; }
 };
 
 enum class ControllerKind : std::uint8_t { Coast, Prograde, Retrograde, Wander };
@@ -97,6 +107,7 @@ class CoastController final : public IController {
 public:
     ShuttleCommand update(const ShuttleObservation& obs, Rng& rng) override;
     std::int64_t nextTick(const ShuttleObservation&) const override { return std::numeric_limits<std::int64_t>::max(); }
+    bool rotationOnlyWhenDry() const override { return true; }
 };
 
 // Points along (sign = +1) or against (sign = -1) the velocity relative to the parent and burns at full throttle once
@@ -112,6 +123,7 @@ public:
     explicit BurnController(double sign) : sign_(sign) {}
     ShuttleCommand update(const ShuttleObservation& obs, Rng& rng) override;
     std::int64_t nextTick(const ShuttleObservation& obs) const override;
+    bool rotationOnlyWhenDry() const override { return true; }   // the empty-tank branch of update() only damps the spin
 
     // A spin below this (rad/s) of a shuttle that cannot thrust is left alone.
     static constexpr double kRestSpin = 1e-9;
@@ -146,6 +158,7 @@ public:
     explicit WanderController(const WanderParams& p = WanderParams()) : params_(p) {}
     ShuttleCommand update(const ShuttleObservation& obs, Rng& rng) override;
     std::int64_t nextTick(const ShuttleObservation& obs) const override;
+    bool rotationOnlyWhenDry() const override { return true; }   // a pure function of (shuttle id, tick)
 
     // The command of the segment that contains this tick. update() returns exactly this.
     ShuttleCommand commandFor(std::uint64_t shuttleId, std::int64_t tick) const;

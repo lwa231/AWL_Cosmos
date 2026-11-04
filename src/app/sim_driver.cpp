@@ -85,9 +85,12 @@ const FrameInfo& SimDriver::advanceTo(double t)
 
 const FrameInfo& SimDriver::runFrame(double wantedTarget, double previousTarget)
 {
-    const long stepsBefore = sim_.stats().bodySteps;
+    const SimulationStats before = sim_.stats();
     runPhysics(wantedTarget);
-    info_.bodySteps = sim_.stats().bodySteps - stepsBefore;
+    info_.bodySteps = sim_.stats().bodySteps - before.bodySteps;
+    info_.shuttleSteps = sim_.stats().shuttleSteps - before.shuttleSteps;
+    info_.bodiesSeconds = sim_.stats().bodySeconds - before.bodySeconds;
+    info_.shuttleSeconds = (sim_.stats().shuttleSetupSeconds - before.shuttleSetupSeconds) + (sim_.stats().shuttleRunSeconds - before.shuttleRunSeconds);
 
     // The physics fell short (budget or failure): the display time waits at the physics time instead of running away
     if (sim_.time() < wantedTarget) {
@@ -98,8 +101,10 @@ const FrameInfo& SimDriver::runFrame(double wantedTarget, double previousTarget)
     info_.simTime = sim_.time();
     info_.simDelta = info_.target - previousTarget;
 
+    const auto stateStart = std::chrono::steady_clock::now();
     collectEvents();
     buildState(info_.target, state_);
+    info_.stateSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - stateStart).count();
 
     // Events the display has reached. pending_ is sorted by (t, id), so they are a prefix.
     due_.clear();

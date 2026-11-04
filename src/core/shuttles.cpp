@@ -178,6 +178,86 @@ bool Shuttles::consistent() const
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Dense ephemeris
+
+void DenseEphemeris::build(const IAS15& ias)
+{
+    n_ = ias.bodyCount();
+    t0_ = ias.stepStartTime();
+    t1_ = ias.stepEndTime();
+    dt_ = ias.denseDt();
+    dt2_ = dt_ * dt_;
+    c_.resize(3 * n_);
+    const double* x0 = ias.denseX0();
+    const double* v0 = ias.denseV0();
+    const double* a0 = ias.denseA0();
+    const double* b = ias.denseB();
+    static const double kP[7] = {6.0, 12.0, 20.0, 30.0, 42.0, 56.0, 72.0};
+    static const double kQ[7] = {2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0};
+    for (std::size_t k = 0; k < 3 * n_; ++k) {
+        Coord& c = c_[k];
+        c.x0 = x0[k];
+        c.v0 = v0[k];
+        c.p[0] = a0[k] / 2.0;
+        c.q[0] = a0[k];
+        for (int m = 0; m < 7; ++m) {
+            c.p[m + 1] = b[7 * k + static_cast<std::size_t>(m)] / kP[m];
+            c.q[m + 1] = b[7 * k + static_cast<std::size_t>(m)] / kQ[m];
+        }
+    }
+}
+
+// Same operations in the same order as ias15::positionAt / velocityAt (the constants are pre-divided).
+double DenseEphemeris::evalPosition(const Coord& c, double hh, double dt, double dt2)
+{
+    double p = c.p[7];
+    p = c.p[6] + hh * p;
+    p = c.p[5] + hh * p;
+    p = c.p[4] + hh * p;
+    p = c.p[3] + hh * p;
+    p = c.p[2] + hh * p;
+    p = c.p[1] + hh * p;
+    p = c.p[0] + hh * p;
+    return c.x0 + c.v0 * dt * hh + dt2 * hh * hh * p;
+}
+
+double DenseEphemeris::evalVelocity(const Coord& c, double hh, double dt)
+{
+    double p = c.q[7];
+    p = c.q[6] + hh * p;
+    p = c.q[5] + hh * p;
+    p = c.q[4] + hh * p;
+    p = c.q[3] + hh * p;
+    p = c.q[2] + hh * p;
+    p = c.q[1] + hh * p;
+    p = c.q[0] + hh * p;
+    return c.v0 + dt * hh * p;
+}
+
+Vec3 DenseEphemeris::position(std::size_t body, double t) const
+{
+    const double hh = (t - t0_) / dt_;
+    const Coord* c = &c_[3 * body];
+    return {evalPosition(c[0], hh, dt_, dt2_), evalPosition(c[1], hh, dt_, dt2_), evalPosition(c[2], hh, dt_, dt2_)};
+}
+
+Vec3 DenseEphemeris::velocity(std::size_t body, double t) const
+{
+    const double hh = (t - t0_) / dt_;
+    const Coord* c = &c_[3 * body];
+    return {evalVelocity(c[0], hh, dt_), evalVelocity(c[1], hh, dt_), evalVelocity(c[2], hh, dt_)};
+}
+
+void DenseEphemeris::positions(double t, Vec3* out) const
+{
+    const double hh = (t - t0_) / dt_;
+    for (std::size_t j = 0; j < n_; ++j) {
+        const Coord* c = &c_[3 * j];
+        out[j] = {evalPosition(c[0], hh, dt_, dt2_), evalPosition(c[1], hh, dt_, dt2_), evalPosition(c[2], hh, dt_, dt2_)};
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Environment
 
 ShuttleEnvironment::ShuttleEnvironment(const Bodies& b, const IBodyEphemeris& e, const ControllerSet& c)
@@ -210,6 +290,7 @@ struct Dyn {
 // Constants of one shuttle plus its held command.
 struct Ctx {
     const ShuttleEnvironment& env;
+    BodyPositionCache& cache;
     double dry, maxThrust, ve, cdA, maxTorque, inertia;
     bool infinite;
     double throttle, turn;
@@ -222,6 +303,7 @@ struct Ctx {
 struct Gravity {
     const Bodies& b;
     const IBodyEphemeris& eph;
+    BodyPositionCache& cache;
     mutable long calls = 0;
 
     Vec3 operator()(double t, const Vec3& r) const
@@ -229,8 +311,9 @@ struct Gravity {
         ++calls;
         Vec3 a;
         const std::size_t n = b.size();
+        const Vec3* pos = cache.at(eph, t);
         for (std::size_t j = 0; j < n; ++j) {
-            const Vec3 d = eph.position(j, t) - r;
+            const Vec3 d = pos[j] - r;
             const double d2 = norm2(d);
             const double R = b.radius[j];
             if (d2 < R * R) {
@@ -252,13 +335,14 @@ struct Dominant {
     Vec3 pos;
 };
 
-Dominant dominantBody(const ShuttleEnvironment& env, double t, const Vec3& r)
+Dominant dominantBody(const ShuttleEnvironment& env, BodyPositionCache& cache, double t, const Vec3& r)
 {
     Dominant best;
     double bestPull = -1.0;
     const Bodies& b = env.bodies;
+    const Vec3* pos = cache.at(env.ephemeris, t);
     for (std::size_t j = 0; j < b.size(); ++j) {
-        const Vec3 p = env.ephemeris.position(j, t);
+        const Vec3 p = pos[j];
         const double d2 = norm2(p - r);
         const double R = b.radius[j];
         const double pull = b.mu[j] / std::max(d2, R * R);
@@ -288,15 +372,18 @@ double dynamicalTime(const Dominant& dom, const Bodies& b)
 // g = mu / reach^2, the strongest on the way: gap = vr t + g t^2 / 2. That is a lower bound of the real time for a body
 // pulling radially (the centrifugal term only slows an orbit's fall), so a circular orbit just above the top is not cut to
 // the dive rate while a fall into the layer still cannot jump it. infinity = no limit.
-double atmosphereStepCap(const ShuttleEnvironment& env, double activeTime, double t, const Vec3& r, const Vec3& v)
+double atmosphereStepCap(const ShuttleEnvironment& env, BodyPositionCache& cache, double activeTime, double t, const Vec3& r,
+                         const Vec3& v)
 {
     const double inf = std::numeric_limits<double>::infinity();
     double cap = inf;
     const Bodies& b = env.bodies;
+    const Vec3* bodyPos = nullptr;   // fetched on the first body with an atmosphere
     for (std::size_t j = 0; j < b.size(); ++j) {
         const double top = env.atmosphereTop[j];
         if (!(top > 0.0)) continue;
-        const Vec3 pos = env.ephemeris.position(j, t);
+        if (!bodyPos) bodyPos = cache.at(env.ephemeris, t);
+        const Vec3 pos = bodyPos[j];
         const Vec3 rel = r - pos;
         const double dist = norm(rel);
         const double reach = b.radius[j] + top;
@@ -344,10 +431,12 @@ void thrustOp(Dyn& z, const Ctx& c, double tSub, double d)
 void dragOp(Dyn& z, const Ctx& c, double tBody, double d)
 {
     const Bodies& b = c.env.bodies;
+    const Vec3* bodyPos = nullptr;   // fetched on the first body with an atmosphere
     for (std::size_t j = 0; j < b.size(); ++j) {
         const double top = c.env.atmosphereTop[j];
         if (!(top > 0.0)) continue;
-        const Vec3 pos = c.env.ephemeris.position(j, tBody);
+        if (!bodyPos) bodyPos = c.cache.at(c.env.ephemeris, tBody);
+        const Vec3 pos = bodyPos[j];
         const double dist2 = norm2(z.r - pos);
         const double R = b.radius[j];
         const double reach = R + top;
@@ -367,21 +456,22 @@ void rotateOp(Dyn& z, const Ctx& c, double d)
     z.omega = rot.omega;
 }
 
-// First half: thrust, drag, rotation. Second half: drag, thrust, rotation (the whole step is a palindrome).
-void firstHalf(Dyn& z, const Ctx& c, double t, double h)
+// First half: thrust, drag, rotation. Second half: drag, thrust, rotation (the whole step is a palindrome). `rotate` false
+// leaves the rotation to the caller (a step with controller ticks inside: the torque changes at them).
+void firstHalf(Dyn& z, const Ctx& c, double t, double h, bool rotate = true)
 {
     const double d = 0.5 * h;
     thrustOp(z, c, t, d);
     dragOp(z, c, t, d);
-    rotateOp(z, c, d);
+    if (rotate) rotateOp(z, c, d);
 }
 
-void secondHalf(Dyn& z, const Ctx& c, double t, double h, double tEnd)
+void secondHalf(Dyn& z, const Ctx& c, double t, double h, double tEnd, bool rotate = true)
 {
     const double d = 0.5 * h;
     dragOp(z, c, tEnd, d);
     thrustOp(z, c, t + d, d);
-    rotateOp(z, c, d);
+    if (rotate) rotateOp(z, c, d);
 }
 
 bool finiteState(const Dyn& z)
@@ -395,17 +485,23 @@ double wrapHeading(double a) { return wrapAngle(a); }
 } // namespace
 
 void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const ShuttleEnvironment& env,
-                      std::vector<Event>& events, IShuttleStepHook* hook, ShuttleStats* stats)
+                      std::vector<Event>& events, IShuttleStepHook* hook, ShuttleStats* stats, ShuttleScratch* scratch)
 {
     if (!(t1 > t0) || s.alive[i] == 0) return;
+    ShuttleScratch localScratch;
+    ShuttleScratch& work = scratch ? *scratch : localScratch;
+    BodyPositionCache& cache = work.positions;
+    std::vector<ShuttleRotationSample>& rotations = work.rotations;
+    IController* const controller = env.controllers.get(s.controller[i]);
+    const bool controllerRotationOnly = controller != nullptr && controller->rotationOnlyWhenDry();
 
     const Bodies& B = env.bodies;
     const IBodyEphemeris& eph = env.ephemeris;
     const double period = env.controllerTick;
     const ShuttleId id = s.ids[i];
-    const Gravity grav{B, eph};
+    const Gravity grav{B, eph, cache};
 
-    Ctx c{env, s.dryMass[i], s.maxThrust[i], s.exhaustVelocity[i], s.cdA[i], s.maxTorque[i], s.inertia[i],
+    Ctx c{env, cache, s.dryMass[i], s.maxThrust[i], s.exhaustVelocity[i], s.cdA[i], s.maxTorque[i], s.inertia[i],
           s.infiniteFuel, s.throttle[i], s.turn[i]};
 
     Dyn y;
@@ -422,8 +518,10 @@ void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const Sh
     double t = t0;
     bool killed = false;
 
-    // Evaluate the shuttle's controller at tick k, time tNow
-    auto evaluateTick = [&](std::int64_t k, double tNow) {
+    // Evaluate the shuttle's controller at tick k, time tNow. `rotationOnly` (a tick inside a gravity step of a shuttle that
+    // cannot thrust, see IController::rotationOnlyWhenDry): heading and spin are the given ones, the position and velocity are
+    // those of the start of the step and there is no parent.
+    auto evaluateTick = [&](std::int64_t k, double tNow, bool rotationOnly = false, double theta = 0.0, double omega = 0.0) {
         ShuttleObservation obs;
         obs.shuttleId = id;
         obs.tick = k;
@@ -431,8 +529,8 @@ void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const Sh
         obs.controllerTick_s = period;
         obs.position = y.r;
         obs.velocity = y.v;
-        obs.heading = y.theta;
-        obs.spin = y.omega;
+        obs.heading = rotationOnly ? theta : y.theta;
+        obs.spin = rotationOnly ? omega : y.omega;
         obs.mass = c.dry + y.fuel;
         obs.dryMass = c.dry;
         obs.fuelMass = y.fuel;
@@ -442,10 +540,12 @@ void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const Sh
         obs.maxTorque = c.maxTorque;
         obs.inertia = c.inertia;
         ParentRef parent;
-        if (env.parents != nullptr) {
+        if (rotationOnly) {
+            // no parent: the controller does not read it
+        } else if (env.parents != nullptr) {
             parent = env.parents->parentOf(tNow, y.r);
         } else {
-            const Dominant dom = dominantBody(env, tNow, y.r);
+            const Dominant dom = dominantBody(env, cache, tNow, y.r);
             if (dom.j != kNone) {
                 parent.id = B.ids[dom.j];
                 parent.mu = B.mu[dom.j];
@@ -459,7 +559,7 @@ void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const Sh
         obs.relVelocity = y.v - parent.v;
         obs.command = {c.throttle, c.turn};
 
-        IController* ctrl = env.controllers.get(s.controller[i]);
+        IController* ctrl = controller;
         std::int64_t next = k + 1;
         if (ctrl != nullptr) {
             Rng rng = Rng::forTick(id, static_cast<std::uint64_t>(k));
@@ -492,9 +592,12 @@ void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const Sh
         // Controller tick due: the command may change here
         if (tickTime(nextTick) <= t) evaluateTick(std::max(nextTick, tickIndexAt(t)), t);
 
-        const double limit = std::min(t1, tickTime(nextTick));
+        // A shuttle that cannot thrust any more (finite fuel, the tank empty and FuelEmpty reported) and whose controller only
+        // turns it (rotationOnlyWhenDry): a tick cannot change the trajectory, so it is not a boundary of the gravity step.
+        const bool skipTicks = controllerRotationOnly && !c.infinite && !(y.fuel > 0.0) && y.reported;
+        const double limit = skipTicks ? t1 : std::min(t1, tickTime(nextTick));
 
-        const Dominant dom = dominantBody(env, t, y.r);
+        const Dominant dom = dominantBody(env, cache, t, y.r);
         if (!(h > 0.0)) h = 0.01 * dynamicalTime(dom, B);
 
         // Limits from the split operators (only while they are active)
@@ -512,7 +615,7 @@ void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const Sh
                 cap = std::min(cap, tEmpty * (1.0 + kFuelOutMargin));
             }
             if (std::isfinite(activeTime) || env.atmosphereResolution > 0.0)
-                cap = std::min(cap, atmosphereStepCap(env, activeTime, t, y.r, y.v));
+                cap = std::min(cap, atmosphereStepCap(env, cache, activeTime, t, y.r, y.v));
         }
         if (thrusting && env.maxHeadingChangePerStep > 0.0) {
             // omega h + alpha h^2 / 2 <= limit angle (worst sign)
@@ -528,7 +631,7 @@ void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const Sh
         Dyn z;
         Dopri5Result res;
         double hTry = 0.0, tEnd = t, err = 0.0;
-        bool clipped = false;
+        bool clipped = false, ticksInside = false;
         for (;;) {
             clipped = cap < h;
             hTry = clipped ? cap : h;
@@ -536,15 +639,16 @@ void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const Sh
             if (!(tEnd > t)) tEnd = limit; // h is below the resolution of t
             hTry = tEnd - t;
 
+            ticksInside = skipTicks && tickTime(nextTick) < tEnd;   // the torque changes inside this step
             z = y;
             z.emptyAt = std::numeric_limits<double>::quiet_NaN();
-            firstHalf(z, c, t, hTry);
+            firstHalf(z, c, t, hTry, !ticksInside);
             res = dopri5Step(grav, t, hTry, Dopri5State{z.r, z.v}, a0);
 
             // Error norm with the scales of the dominant body's orbit (distance: the smaller of start and end)
             double d = std::max(norm(y.r), 1.0), mu = 0.0;
             if (dom.j != kNone) {
-                const double d1 = norm(res.y1.r - eph.position(dom.j, tEnd));
+                const double d1 = norm(res.y1.r - cache.at(eph, tEnd)[dom.j]);
                 d = std::max({std::min(dom.d, d1), B.radius[dom.j], 1e-3});
                 mu = dom.mu;
             }
@@ -558,7 +662,26 @@ void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const Sh
         // Accept
         z.r = res.y1.r;
         z.v = res.y1.v;
-        secondHalf(z, c, t, hTry, tEnd);
+        secondHalf(z, c, t, hTry, tEnd, !ticksInside);
+        rotations.clear();
+        if (ticksInside) {
+            // Heading and spin through the ticks of the step: constant torque between them, so exact (plan 5.7). Every tick
+            // still runs its controller (the command it returns holds until the next one).
+            Rotation rot{y.theta, y.omega};
+            double tr = t;
+            std::int64_t k = nextTick;
+            while (tickTime(k) < tEnd) {
+                const double tk = tickTime(k);
+                rot = advanceRotation(rot.theta, rot.omega, c.alpha(), tk - tr);
+                tr = tk;
+                evaluateTick(k, tk, true, rot.theta, rot.omega);
+                rotations.push_back({tk, rot.theta, rot.omega});
+                k = nextTick;
+            }
+            rot = advanceRotation(rot.theta, rot.omega, c.alpha(), tEnd - tr);
+            z.theta = rot.theta;
+            z.omega = rot.omega;
+        }
         if (!finiteState(z)) {
             // Not committed: the shuttle keeps its last finite state
             events.push_back(makeShuttleDestroyed(t, id, 0));
@@ -589,6 +712,8 @@ void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const Sh
         info.spin0 = y.omega;
         info.heading1 = theta1;
         info.spin1 = z.omega;
+        info.rotations = rotations.data();
+        info.rotationCount = rotations.size();
 
         y = z;
         y.emptyAt = std::numeric_limits<double>::quiet_NaN();

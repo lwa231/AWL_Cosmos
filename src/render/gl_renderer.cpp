@@ -113,6 +113,8 @@ public:
     void drawLines(LinePass pass) override;
     void drawExplosions() override;
     void endFrame() override;
+    void gpuFrameBegin() override;
+    void gpuFrameEnd() override;
     const RenderStats& frameStats() const override { return stats_; }
     const RenderTotals& totals() const override { return totals_; }
     bool readBackBuffer(std::vector<std::uint8_t>& rgb, int& width, int& height) override;
@@ -134,6 +136,11 @@ private:
     unsigned int wellQuery_[2] = {0, 0};     // GL_TIME_ELAPSED of the ring pass, read back a frame or two late
     bool wellQueryPending_[2] = {false, false};
     int wellQueryNext_ = 0;
+    static constexpr int kFrameQueries = 4;
+    unsigned int frameQuery_[kFrameQueries][2] = {};   // GL_TIMESTAMP pairs (start, end) of whole frames
+    bool frameQueryPending_[kFrameQueries] = {};
+    int frameQueryNext_ = 0;
+    bool frameQueryOpen_ = false;
     unsigned int vao_ = 0;     // core profile needs a VAO bound even though all data is pulled from storage buffers
     unsigned int frameUbo_ = 0;
     StreamArena arena_;
@@ -187,6 +194,7 @@ bool GlRenderer::init(const RendererConfig& config)
     }
 
     glCreateQueries(GL_TIME_ELAPSED, 2, wellQuery_);
+    for (auto& pair : frameQuery_) glCreateQueries(GL_TIMESTAMP, 2, pair);
     if (!explosions_.init(config.shaderDir)) {
         shutdown();
         return false;
@@ -219,6 +227,12 @@ void GlRenderer::shutdown()
     if (wellQuery_[0]) glDeleteQueries(2, wellQuery_);
     wellQuery_[0] = wellQuery_[1] = 0;
     wellQueryPending_[0] = wellQueryPending_[1] = false;
+    for (int i = 0; i < kFrameQueries; ++i) {
+        if (frameQuery_[i][0]) glDeleteQueries(2, frameQuery_[i]);
+        frameQuery_[i][0] = frameQuery_[i][1] = 0;
+        frameQueryPending_[i] = false;
+    }
+    frameQueryOpen_ = false;
     vao_ = progBodies_ = progShuttles_ = progLines_ = progWells_ = progAtmospheres_ = progCircles_ = 0;
     initialised_ = false;
     inFrame_ = false;
@@ -511,6 +525,36 @@ void GlRenderer::drawExplosions()
     stats_.drawCalls += r.drawCalls;
     stats_.explosionDrawCalls += r.drawCalls;
     stats_.explosionFragments += r.fragments;
+}
+
+void GlRenderer::gpuFrameBegin()
+{
+    if (!initialised_) return;
+    const int q = frameQueryNext_;
+    if (frameQueryPending_[q]) {
+        GLint ready = 0;
+        glGetQueryObjectiv(frameQuery_[q][1], GL_QUERY_RESULT_AVAILABLE, &ready);
+        if (!ready) return;   // still in flight: this frame is not timed
+        GLuint64 t0 = 0, t1 = 0;
+        glGetQueryObjectui64v(frameQuery_[q][0], GL_QUERY_RESULT, &t0);
+        glGetQueryObjectui64v(frameQuery_[q][1], GL_QUERY_RESULT, &t1);
+        totals_.frameGpuMsLast = static_cast<double>(t1 - t0) * 1e-6;
+        totals_.frameGpuMsSum += totals_.frameGpuMsLast;
+        ++totals_.frameGpuSamples;
+        frameQueryPending_[q] = false;
+    }
+    glQueryCounter(frameQuery_[q][0], GL_TIMESTAMP);
+    frameQueryOpen_ = true;
+}
+
+void GlRenderer::gpuFrameEnd()
+{
+    if (!initialised_ || !frameQueryOpen_) return;
+    const int q = frameQueryNext_;
+    glQueryCounter(frameQuery_[q][1], GL_TIMESTAMP);
+    frameQueryPending_[q] = true;
+    frameQueryNext_ = (q + 1) % kFrameQueries;
+    frameQueryOpen_ = false;
 }
 
 void GlRenderer::endFrame()

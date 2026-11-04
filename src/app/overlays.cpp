@@ -1,5 +1,6 @@
 #include "app/overlays.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include "core/atmosphere.h"
@@ -45,11 +46,11 @@ ParentRel bodyParentRel(const Hierarchy& h, const DisplayState& st, std::size_t 
     return p;
 }
 
-ParentRel shuttleParentRel(const Hierarchy& h, const DisplayShuttle& s)
+ParentRel shuttleParentRel(const Hierarchy& h, const HillTable& hills, const DisplayShuttle& s)
 {
     ParentRel p;
     if (h.root < 0) return p;
-    const int node = shuttleParent(h, s.r);
+    const int node = shuttleParent(h, hills, s.r);
     if (node < 0) return p;
     const HierarchyNode& n = h.nodes[static_cast<std::size_t>(node)];
     p.ok = n.mu > 0.0;
@@ -162,6 +163,7 @@ void OverlayBuilder::ensureHierarchy(const DisplayState& st)
         hmu_[i] = st.bodies[i].mu;
     }
     hier_ = buildHierarchy(hr_, hv_, hmu_);
+    buildHillTable(hier_, hills_);
     haveHier_ = true;
 }
 
@@ -187,7 +189,11 @@ void OverlayBuilder::build(const DisplayState& st, const Simulation& sim, std::u
     if (!(v.metresPerPixel > 0.0) || !std::isfinite(v.metresPerPixel)) v.metresPerPixel = 1.0;
     const FrameOrigin origin = frameOrigin(st, v);
 
+    using Clock = std::chrono::steady_clock;
+    auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+
     // Trails: record when shown (or when asked to keep the history), drop the history when switched off.
+    const Clock::time_point c0 = Clock::now();
     const bool recording = settings.trails || settings.keepTrailsWhileHidden;
     if (recording) {
         recordTrails(st, v);
@@ -196,10 +202,20 @@ void OverlayBuilder::build(const DisplayState& st, const Simulation& sim, std::u
         trails_.clear();
         trailsWereOn_ = false;
     }
+    const Clock::time_point c1 = Clock::now();
     if (settings.trails) drawTrails(st, v, origin, frame);
+    const Clock::time_point c2 = Clock::now();
     if (settings.osculatingOrbits) drawOrbits(st, v, frame);
+    const Clock::time_point c3 = Clock::now();
     updatePrediction(st, sim, v, origin, frame);
+    const Clock::time_point c4 = Clock::now();
     if (settings.velocityArrows || settings.accelerationArrows) drawArrows(st, sim, v, origin, frame);
+    const Clock::time_point c5 = Clock::now();
+    stats_.trailRecordMs = ms(c0, c1);
+    stats_.trailDrawMs = ms(c1, c2);
+    stats_.orbitsMs = ms(c2, c3);
+    stats_.predictMs = ms(c3, c4);
+    stats_.arrowsMs = ms(c4, c5);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -225,6 +241,30 @@ void OverlayBuilder::recordTrails(const DisplayState& st, const OverlayView& vie
     trails_.pruneUntouched(stamp_);
 }
 
+namespace {
+
+constexpr std::size_t kTrailChunk = 4;    // trails per chunk
+constexpr std::size_t kOrbitChunk = 8;    // orbits per chunk
+
+// Appends src after dst's content (strips re-based).
+void appendBatch(LineBatch& dst, const LineBatch& src)
+{
+    const std::uint32_t base = static_cast<std::uint32_t>(dst.vertices.size());
+    dst.vertices.insert(dst.vertices.end(), src.vertices.begin(), src.vertices.end());
+    for (const LineStrip& s : src.strips) dst.strips.push_back({s.first + base, s.count, s.widthPx});
+    dst.segments.insert(dst.segments.end(), src.segments.begin(), src.segments.end());
+}
+
+} // namespace
+
+void OverlayBuilder::runChunks(std::size_t chunks, const std::function<void(std::size_t)>& fn)
+{
+    if (chunks == 0) return;
+    if (pool_ != nullptr && pool_->threads() > 1 && chunks > 1) pool_->run(chunks, fn);
+    else
+        for (std::size_t k = 0; k < chunks; ++k) fn(k);
+}
+
 void OverlayBuilder::drawTrails(const DisplayState& st, const OverlayView& view, const FrameOrigin& o, RenderFrame& frame)
 {
     const Trail* originTrail = nullptr;
@@ -245,44 +285,66 @@ void OverlayBuilder::drawTrails(const DisplayState& st, const OverlayView& view,
     p.offX = o.pos.x - view.centre.x;
     p.offY = o.pos.y - view.centre.y;
     p.metresPerPixel = view.metresPerPixel;
+    if (frame.viewportWidth > 0 && frame.viewportHeight > 0) {   // cull what falls outside the view
+        p.cullHalfW = 0.5 * frame.viewportWidth * view.metresPerPixel;
+        p.cullHalfH = 0.5 * frame.viewportHeight * view.metresPerPixel;
+    }
 
-    auto draw = [&](std::uint64_t id, const Rgba& colour) {
+    trailItems_.clear();
+    auto add = [&](std::uint64_t id, const Rgba& colour) {
         if (id == originId) return;    // the frame origin sits still in its own frame
         const Trail* t = trails_.find(id);
         if (!t) return;
-        p.colour = colour;
-        stats_.trailVertices += appendTrail(*t, originTrail, p, frame.underlay);
-        ++stats_.trailObjects;
+        trailItems_.push_back({t, colour});
     };
     if (settings.onBodies)
-        for (const DisplayBody& b : st.bodies) draw(b.id, objectColour(b, settings.trailAlpha));
+        for (const DisplayBody& b : st.bodies) add(b.id, objectColour(b, settings.trailAlpha));
     if (settings.onShuttles)
-        for (const DisplayShuttle& s : st.shuttles) draw(s.id, objectColour(s, settings.trailAlpha));
+        for (const DisplayShuttle& s : st.shuttles) add(s.id, objectColour(s, settings.trailAlpha));
+
+    const std::size_t n = trailItems_.size();
+    const std::size_t chunks = (n + kTrailChunk - 1) / kTrailChunk;
+    if (chunkBatches_.size() < chunks) chunkBatches_.resize(chunks);
+    if (chunkCounts_.size() < chunks) chunkCounts_.resize(chunks);
+    runChunks(chunks, [&](std::size_t k) {
+        LineBatch& b = chunkBatches_[k];
+        b.clear();
+        TrailDrawParams q = p;
+        std::size_t verts = 0;
+        for (std::size_t i = k * kTrailChunk, e = std::min(n, i + kTrailChunk); i < e; ++i) {
+            q.colour = trailItems_[i].colour;
+            verts += appendTrail(*trailItems_[i].trail, originTrail, q, b);
+        }
+        chunkCounts_[k] = verts;
+    });
+    for (std::size_t k = 0; k < chunks; ++k) {
+        appendBatch(frame.underlay, chunkBatches_[k]);
+        stats_.trailVertices += chunkCounts_[k];
+    }
+    stats_.trailObjects += n;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
 // Osculating orbits
 
-void OverlayBuilder::appendOrbit(const Vec3& parentPos, const Vec3&, double muTotal, const Vec3& r, const Vec3& v,
-                                 const Rgba& colour, const OverlayView& view, RenderFrame& frame)
+bool OverlayBuilder::appendOrbit(const Vec3& parentPos, double muTotal, const Vec3& r, const Vec3& v, const Rgba& colour,
+                                 const OverlayView& view, double halfDiag, LineBatch& b, OrbitCurve& curve) const
 {
     const Elements el = stateToElements(r, v, muTotal);
 
     const double mpp = view.metresPerPixel;
-    const double halfDiag = 0.5 * std::hypot(static_cast<double>(frame.viewportWidth), static_cast<double>(frame.viewportHeight)) * mpp;
     const double dx = parentPos.x - view.centre.x, dy = parentPos.y - view.centre.y;
     const double dist = std::hypot(dx, dy);
     const double rCap = std::max(20.0 * el.q, 2.0 * (2.0 * halfDiag + dist));
 
-    if (!buildOrbitCurve(el, rCap, settings.orbitSegments, curve_)) return;
-    if (el.e < 1.0 && curve_.radiusMax < 1.5 * mpp) return;               // smaller than a dot
-    if (dist - curve_.radiusMax > halfDiag) return;                       // the loop's circle misses the view entirely
+    if (!buildOrbitCurve(el, rCap, settings.orbitSegments, curve)) return false;
+    if (el.e < 1.0 && curve.radiusMax < 1.5 * mpp) return false;               // smaller than a dot
+    if (dist - curve.radiusMax > halfDiag) return false;                       // the loop's circle misses the view entirely
 
-    LineBatch& b = frame.underlay;
     const std::size_t first = b.vertices.size();
-    for (const Vec3& q : curve_.points)
+    for (const Vec3& q : curve.points)
         b.vertices.push_back({static_cast<float>(dx + q.x), static_cast<float>(dy + q.y), colour.r, colour.g, colour.b, colour.a});
-    b.strips.push_back({static_cast<std::uint32_t>(first), static_cast<std::uint32_t>(curve_.points.size()), 1.0f});
+    b.strips.push_back({static_cast<std::uint32_t>(first), static_cast<std::uint32_t>(curve.points.size()), 1.0f});
 
     // Periapsis: a '+', apoapsis: an 'x', both kMarkPx wide on screen.
     const double k = kMarkPx * mpp;
@@ -293,34 +355,57 @@ void OverlayBuilder::appendOrbit(const Vec3& parentPos, const Vec3&, double muTo
         const LineVertex p1{static_cast<float>(cx + bx), static_cast<float>(cy + by), mark.r, mark.g, mark.b, mark.a};
         b.addSegment(p0, p1, 1.0f);
     };
-    seg(dx + curve_.periapsis.x, dy + curve_.periapsis.y, -k, 0.0, k, 0.0);
-    seg(dx + curve_.periapsis.x, dy + curve_.periapsis.y, 0.0, -k, 0.0, k);
-    if (curve_.hasApoapsis) {
+    seg(dx + curve.periapsis.x, dy + curve.periapsis.y, -k, 0.0, k, 0.0);
+    seg(dx + curve.periapsis.x, dy + curve.periapsis.y, 0.0, -k, 0.0, k);
+    if (curve.hasApoapsis) {
         const double s = k * 0.7071067811865476;
-        seg(dx + curve_.apoapsis.x, dy + curve_.apoapsis.y, -s, -s, s, s);
-        seg(dx + curve_.apoapsis.x, dy + curve_.apoapsis.y, -s, s, s, -s);
+        seg(dx + curve.apoapsis.x, dy + curve.apoapsis.y, -s, -s, s, s);
+        seg(dx + curve.apoapsis.x, dy + curve.apoapsis.y, -s, s, s, -s);
     }
-    ++stats_.orbits;
+    return true;
 }
 
 void OverlayBuilder::drawOrbits(const DisplayState& st, const OverlayView& view, RenderFrame& frame)
 {
     ensureHierarchy(st);
+    orbitItems_.clear();
     if (settings.onBodies) {
         for (std::size_t i = 0; i < st.bodies.size(); ++i) {
             if (st.bodies[i].absorbed) continue;
             const ParentRel p = bodyParentRel(hier_, st, i);
             if (!p.ok) continue;
-            appendOrbit(p.parentPos, p.parentVel, p.mu, p.r, p.v, objectColour(st.bodies[i], settings.orbitAlpha), view, frame);
+            orbitItems_.push_back({p.parentPos, p.mu, p.r, p.v, objectColour(st.bodies[i], settings.orbitAlpha)});
         }
     }
     if (settings.onShuttles) {
         for (const DisplayShuttle& s : st.shuttles) {
             if (s.dying) continue;
-            const ParentRel p = shuttleParentRel(hier_, s);
+            const ParentRel p = shuttleParentRel(hier_, hills_, s);
             if (!p.ok) continue;
-            appendOrbit(p.parentPos, p.parentVel, p.mu, p.r, p.v, objectColour(s, settings.orbitAlpha), view, frame);
+            orbitItems_.push_back({p.parentPos, p.mu, p.r, p.v, objectColour(s, settings.orbitAlpha)});
         }
+    }
+
+    const double halfDiag =
+        0.5 * std::hypot(static_cast<double>(frame.viewportWidth), static_cast<double>(frame.viewportHeight)) * view.metresPerPixel;
+    const std::size_t n = orbitItems_.size();
+    const std::size_t chunks = (n + kOrbitChunk - 1) / kOrbitChunk;
+    if (chunkBatches_.size() < chunks) chunkBatches_.resize(chunks);
+    if (chunkCurves_.size() < chunks) chunkCurves_.resize(chunks);
+    if (chunkCounts_.size() < chunks) chunkCounts_.resize(chunks);
+    runChunks(chunks, [&](std::size_t k) {
+        LineBatch& b = chunkBatches_[k];
+        b.clear();
+        std::size_t drawn = 0;
+        for (std::size_t i = k * kOrbitChunk, e = std::min(n, i + kOrbitChunk); i < e; ++i) {
+            const OrbitItem& it = orbitItems_[i];
+            if (appendOrbit(it.parentPos, it.mu, it.r, it.v, it.colour, view, halfDiag, b, chunkCurves_[k])) ++drawn;
+        }
+        chunkCounts_[k] = drawn;
+    });
+    for (std::size_t k = 0; k < chunks; ++k) {
+        appendBatch(frame.underlay, chunkBatches_[k]);
+        stats_.orbits += chunkCounts_[k];
     }
 }
 
@@ -337,7 +422,7 @@ double OverlayBuilder::predictionHorizon(const DisplayState& st, const PredictRe
             if (st.bodies[i].id == target.id) p = bodyParentRel(hier_, st, i);
     } else {
         for (const DisplayShuttle& s : st.shuttles)
-            if (s.id == target.id) p = shuttleParentRel(hier_, s);
+            if (s.id == target.id) p = shuttleParentRel(hier_, hills_, s);
     }
     double h = kFallbackHorizon;
     if (p.ok) {

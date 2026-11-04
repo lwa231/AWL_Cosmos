@@ -1,6 +1,9 @@
 #include <doctest.h>
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <cmath>
+#include <set>
 #include "test_app_overlays_util.h"
 
 using namespace ovl_test;
@@ -184,7 +187,7 @@ TEST_SUITE("app overlays trails")
         OverlayBuilder ob;
         ob.settings.trails = true;
         const double mpp = 1e6;
-        RenderFrame f = frameOf();
+        RenderFrame f = frameOf(2000, 1200);                 // the whole loop (radius 3.7e8 m) is inside the view: nothing is culled
         double rMin = 1e300, rMax = 0.0;
         const double dt = w.moonPeriod / 150.0;
         const int frames = 330;                              // 2.2 moon periods
@@ -229,7 +232,7 @@ TEST_SUITE("app overlays trails")
         CHECK(rMax / rMin < 1.2);
 
         // The same trail in the inertial frame is nowhere near a loop about the planet.
-        f.clearObjects();
+        f = frameOf(20000, 12000);                           // a view wide enough that the far part of the trail is not culled
         ob.build(d.state(), d.sim(), 1, viewAt(planetNow, mpp), f);
         const LineStrip* inertial = stripEndingAt(f.underlay, moonNow.x - planetNow.x, moonNow.y - planetNow.y, 1e5);
         REQUIRE(inertial != nullptr);
@@ -359,6 +362,91 @@ TEST_SUITE("app overlays trails")
             CHECK(f.underlay.strips.capacity() == capS);
             CHECK(f.underlay.segments.capacity() == capG);
             CHECK(f.overlay.segments.capacity() == capO);
+        }
+    }
+
+    TEST_CASE("view culling drops the chords that cannot reach the view and keeps every chord that can")
+    {
+        // A circle of radius 500 m centred 500 m to the right of the camera: only the part near the camera is in a 300 m view.
+        Trail circle;
+        const double w = 2.0 * kPi / 3600.0;
+        for (int i = 0; i <= 1440; ++i) {
+            TrailSample s = circler(i * 2.5, 500.0, w, 0.0, 0.0);
+            s.x += 500.0;
+            circle.record(s, 0.0);
+        }
+        TrailDrawParams p;
+        p.now = 1e30;
+        p.offX = 0.0;
+        p.offY = 0.0;
+        p.metresPerPixel = 1.0;
+        p.minStepPx = 0.0;
+        p.colour = {1.0f, 1.0f, 1.0f, 1.0f};
+        LineBatch full, culled;
+        appendTrail(circle, nullptr, p, full);
+        p.cullHalfW = 300.0;
+        p.cullHalfH = 300.0;
+        appendTrail(circle, nullptr, p, culled);
+        REQUIRE(!full.strips.empty());
+        REQUIRE(!culled.strips.empty());
+
+        auto chordsOf = [](const LineBatch& b) {
+            std::set<std::array<float, 4>> c;
+            for (const LineStrip& s : b.strips)
+                for (std::uint32_t k = 0; k + 1 < s.count; ++k) {
+                    const LineVertex& a = b.vertices[s.first + k];
+                    const LineVertex& e = b.vertices[s.first + k + 1];
+                    c.insert({a.x, a.y, e.x, e.y});
+                }
+            return c;
+        };
+        const auto cf = chordsOf(full), cc = chordsOf(culled);
+        CHECK(cc.size() < cf.size() / 2);                     // most of the loop is outside the view
+        const float lim = 300.0f + 9.5f;                      // half view + margin (8 px) + the line width (1.5 px)
+        for (const auto& c : cc) CHECK(cf.count(c) == 1);     // nothing invented
+        for (const auto& c : cf) {
+            const bool outside = (c[0] > lim && c[2] > lim) || (c[0] < -lim && c[2] < -lim) || (c[1] > lim && c[3] > lim) ||
+                                 (c[1] < -lim && c[3] < -lim);
+            if (!outside) CHECK(cc.count(c) == 1);            // every chord near the view survives
+        }
+        // A strip is cut where the trail leaves the view: a loop that passes through it twice makes two strips at least.
+        CHECK(culled.strips.size() >= 1);
+        // The fade does not depend on which chords are kept: the last vertex of the full trail is the last one of the culled
+        // trail only if it is in view, but every kept vertex carries the alpha of the unculled one.
+        std::set<std::array<float, 3>> va;
+        for (const LineVertex& v : full.vertices) va.insert({v.x, v.y, v.a});
+        for (const LineVertex& v : culled.vertices) CHECK(va.count({v.x, v.y, v.a}) == 1);
+    }
+
+    TEST_CASE("the geometry of trails and orbits does not depend on the number of worker threads")
+    {
+        SunPlanetMoon w;
+        SimDriver d(w.res, SceneSettings{});
+        ThreadPool pool(4);
+        auto run = [&](ThreadPool* tp) {
+            OverlayBuilder ob;
+            ob.setThreadPool(tp);
+            ob.settings.trails = true;
+            ob.settings.osculatingOrbits = true;
+            RenderFrame f = frameOf(2000, 1200);
+            SimDriver dd(w.res, SceneSettings{});
+            for (int i = 1; i <= 60; ++i) {
+                dd.advanceTo(i * 4000.0);
+                f.clearObjects();
+                OverlayView v = viewAt(bodyOf(dd.state(), w.planet)->r, 1e6);
+                ob.build(dd.state(), dd.sim(), 1, v, f);
+            }
+            return f;
+        };
+        const RenderFrame a = run(nullptr), b = run(&pool);
+        REQUIRE(a.underlay.vertices.size() > 100);
+        REQUIRE(a.underlay.vertices.size() == b.underlay.vertices.size());
+        REQUIRE(a.underlay.strips.size() == b.underlay.strips.size());
+        REQUIRE(a.underlay.segments.size() == b.underlay.segments.size());
+        CHECK(std::memcmp(a.underlay.vertices.data(), b.underlay.vertices.data(), a.underlay.vertices.size() * sizeof(LineVertex)) == 0);
+        for (std::size_t k = 0; k < a.underlay.strips.size(); ++k) {
+            CHECK(a.underlay.strips[k].first == b.underlay.strips[k].first);
+            CHECK(a.underlay.strips[k].count == b.underlay.strips[k].count);
         }
     }
 }

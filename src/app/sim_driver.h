@@ -89,6 +89,10 @@ struct FrameInfo {
     double lagSimSeconds = 0.0;  // how far the physics fell short of the wanted t_target (0 unless behind)
     double physicsSeconds = 0.0; // wall time the physics took
     long bodySteps = 0;          // body steps taken
+    long shuttleSteps = 0;       // accepted shuttle steps taken (diagnostics)
+    double bodiesSeconds = 0.0;  // wall time of the body steps (IAS15 + swept test), part of physicsSeconds
+    double shuttleSeconds = 0.0; // wall time of the shuttle passes (setup + threads), part of physicsSeconds
+    double stateSeconds = 0.0;   // wall time of building the DisplayState (events and interpolation), not in physicsSeconds
     bool physicsBehind = false;
     bool failed = false;         // the integrator failed; the simulation stays where it was
 };
