@@ -114,6 +114,7 @@ private:
     struct Seen {   // last display state of a body, for events whose bodies have since vanished
         Vec3 r, v;
         double mu = 0.0, radius = 0.0, spin = 0.0;
+        double t = 0.0;   // sim time of this sample
     };
     bool bodyAt(std::uint64_t id, double t, const DisplayState& st, const Simulation& sim, Vec3& r, Vec3& v) const;
     // Takes n pool slots (at most two ranges, the second after a wrap) and removes them from the older explosions.

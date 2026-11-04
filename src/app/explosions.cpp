@@ -184,10 +184,25 @@ std::uint32_t ExplosionSystem::spawn(const ExplosionSpec& spec)
 
 bool ExplosionSystem::bodyAt(std::uint64_t id, double t, const DisplayState& st, const Simulation& sim, Vec3& r, Vec3& v) const
 {
-    // The dense output of the latest body step has the exact position at the event time
-    if (sim.bodyPositionAt(id, t, r) && sim.bodyVelocityAt(id, t, v)) return true;
+    // The dense output of the latest body step is exact, but only inside that step: Simulation clamps t to the step, and at
+    // high warp a frame spans several body steps, so an event time can lie before the latest step.
+    if (sim.hasBodyStep() && t >= sim.bodyStepStart() && t <= sim.bodyStepEnd() && sim.bodyPositionAt(id, t, r) &&
+        sim.bodyVelocityAt(id, t, v))
+        return true;
+    const auto prev = seen_.find(id);
     for (const DisplayBody& b : st.bodies)
         if (b.id == id && !b.absorbed) {
+            // t lies between the previous frame's sample and this display state: a cubic Hermite through both (error ~ a*dt^2)
+            // beats extrapolating back from one end. Without a usable earlier sample, extrapolate along the velocity.
+            if (prev != seen_.end() && prev->second.t < t && t <= st.t && st.t > prev->second.t) {
+                const Seen& p = prev->second;
+                const double h = st.t - p.t, s = (t - p.t) / h, s2 = s * s, s3 = s2 * s;
+                const double h00 = 2 * s3 - 3 * s2 + 1, h10 = s3 - 2 * s2 + s, h01 = -2 * s3 + 3 * s2, h11 = s3 - s2;
+                const double d00 = (6 * s2 - 6 * s) / h, d10 = (3 * s2 - 4 * s + 1), d01 = (-6 * s2 + 6 * s) / h, d11 = (3 * s2 - 2 * s);
+                r = p.r * h00 + p.v * (h10 * h) + b.r * h01 + b.v * (h11 * h);
+                v = p.r * d00 + p.v * d10 + b.r * d01 + b.v * d11;
+                return true;
+            }
             r = b.r - b.v * (st.t - t);   // back from the display time along the velocity
             v = b.v;
             return true;
@@ -280,6 +295,7 @@ void ExplosionSystem::update(const DisplayState& st, double simDt, double realDt
         s.mu = b.mu;
         s.radius = b.radius;
         s.spin = b.spinRate;
+        s.t = st.t;
     }
 
     const bool running = simDt > 0.0;

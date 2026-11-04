@@ -307,46 +307,54 @@ TEST_SUITE("app explosions")
         for (const ExplosionSystem::Explosion& e : sys.explosions()) CHECK(slots.insert(e.slot).second);
     }
 
-    TEST_CASE("a shuttle that hits Domus makes an explosion at its contact point")
+    TEST_CASE("a shuttle that hits Domus makes an explosion at its contact point, at any warp")
     {
-        scene_test::Lucerna L;
-        const std::size_t domus = L.storeIndex("Domus");
-        ResolvedScene res = std::move(L.res);
-        const BodyId domusId = res.bodies.ids[domus];
-        const double RD = res.bodies.radius[domus];
-        Vec3 pos, vel;
-        sim_test::circularOrbit(res.bodies.mu[domus], RD + 1.5e5, 1.0, sim_test::bodyPos(res.bodies, domus),
-                                sim_test::bodyVel(res.bodies, domus), pos, vel);
-        res.shuttles.push_back(sim_test::resolvedShuttle(900, pos, vel, "Retrograde"));
+        for (const double warp : {8.0, 1.0e4, 1.0e5, 1.0e6}) {
+            CAPTURE(warp);
+            scene_test::Lucerna L;
+            const std::size_t domus = L.storeIndex("Domus");
+            ResolvedScene res = std::move(L.res);
+            const BodyId domusId = res.bodies.ids[domus];
+            const double RD = res.bodies.radius[domus];
+            Vec3 pos, vel;
+            sim_test::circularOrbit(res.bodies.mu[domus], RD + 1.5e5, 1.0, sim_test::bodyPos(res.bodies, domus),
+                                    sim_test::bodyVel(res.bodies, domus), pos, vel);
+            res.shuttles.push_back(sim_test::resolvedShuttle(900, pos, vel, "Retrograde"));
 
-        SimulationOptions opt;
-        opt.ias15.dtMax = 120.0;
-        DriverOptions dopt;
-        dopt.physicsBudget_s = 0.0;
-        SimDriver d(res, SceneSettings{}, opt, dopt);
-        d.warp().set(8.0);
-        ExplosionSystem sys;
-        ExplosionFrame f;
-        bool spawned = false;
-        for (int frame = 0; frame < 8000 && !spawned; ++frame) {
-            d.advance(0.125);
-            sys.handleEvents(d.dueEvents(), d.state(), d.sim());
-            if (sys.liveExplosions() > 0) spawned = true;
+            SimulationOptions opt;
+            opt.ias15.dtMax = 120.0;
+            DriverOptions dopt;
+            dopt.physicsBudget_s = 0.0;
+            SimDriver d(res, SceneSettings{}, opt, dopt);
+            d.warp().set(warp);
+            ExplosionSystem sys;
+            ExplosionFrame f;
+            bool spawned = false;
+            sys.update(d.state(), 0.0, 0.0, kToCamera, f);   // the first frame's state, as the app draws it before any step
+            for (int frame = 0; frame < 20000 && !spawned; ++frame) {
+                d.advance(0.125);
+                sys.handleEvents(d.dueEvents(), d.state(), d.sim());
+                if (sys.liveExplosions() > 0) spawned = true;
+                else sys.update(d.state(), 0.0, 0.125, kToCamera, f);   // as the app does each frame: the system samples the bodies
+            }
+            REQUIRE(spawned);
+            REQUIRE(sys.liveExplosions() == 1);
+            sys.update(d.state(), 1.0, 0.125, kToCamera, f);
+            const ExplosionSystem::Explosion& ex = sys.explosions()[0];
+            CHECK(ex.refBody == domusId);
+            const DisplayBody* dom = nullptr;
+            for (const DisplayBody& b : d.state().bodies)
+                if (b.id == domusId) dom = &b;
+            REQUIRE(dom != nullptr);
+            const double alt = norm(ex.anchor - dom->r) - RD;
+            MESSAGE("anchor altitude " << alt << " m");
+            // The contact point is on the surface: a few metres of shuttle radius and 1 s of drift. At high warp the event time lies
+            // before the latest body step, so the body is taken from the frame's two display samples (a cubic Hermite: tens of
+            // metres at 1e6x, where the clamped dense output was off by up to many planet radii).
+            CHECK(std::fabs(alt) < (warp <= 1.0e5 ? 50.0 : 100.0));
+            CHECK(f.active());
+            CHECK(f.fragmentCount > 1000);
         }
-        REQUIRE(spawned);
-        REQUIRE(sys.liveExplosions() == 1);
-        sys.update(d.state(), 1.0, 0.125, kToCamera, f);
-        const ExplosionSystem::Explosion& ex = sys.explosions()[0];
-        CHECK(ex.refBody == domusId);
-        const DisplayBody* dom = nullptr;
-        for (const DisplayBody& b : d.state().bodies)
-            if (b.id == domusId) dom = &b;
-        REQUIRE(dom != nullptr);
-        const double alt = norm(ex.anchor - dom->r) - RD;
-        MESSAGE("anchor altitude " << alt << " m");
-        CHECK(std::fabs(alt) < 50.0);   // the contact point is on the surface (a few metres of shuttle radius and 1 s of drift)
-        CHECK(f.active());
-        CHECK(f.fragmentCount > 1000);
     }
 
     TEST_CASE("a body collision explodes on the survivor, scaled by the absorbed body")
