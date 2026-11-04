@@ -1,5 +1,6 @@
 #include <doctest.h>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include "core/scene.h"
 #include "test_shuttle_util.h"
@@ -184,6 +185,7 @@ TEST_SUITE("rocket")
     TEST_CASE("rocketBurn: full burn gives dv = ve ln(m0 / m_dry) to 1e-9")
     {
         const BurnResult b = rocketBurn(2000.0, 3000.0, 1.0, 60000.0, 3000.0, 1000.0, false);
+        std::printf("[validation] rocket (rocketBurn): relative error %.3g\n", std::abs(b.dv - 3000.0 * std::log(2.5)) / b.dv);
         CHECK(b.emptied);
         CHECK(b.burnTime == doctest::Approx(150.0).epsilon(1e-15)); // 3000 kg at 20 kg/s
         CHECK(b.fuelUsed == 3000.0);
@@ -248,6 +250,8 @@ TEST_SUITE("rocket")
 
         const double dv = 3000.0 * std::log(2.5);
         const Vec3 dvec = shuttleVel(s, 0) - Vec3{100.0, -50.0, 0.0};
+        std::printf("[validation] rocket (propagateShuttle): dv %.10g, ve ln(m0/mdry) %.10g, relative error %.3g\n", norm(dvec),
+                    3000.0 * std::log(2.5), std::abs(norm(dvec) - dv) / dv);
         CHECK(norm(dvec) == doctest::Approx(dv).epsilon(1e-9));
         CHECK(dvec.x / norm(dvec) == doctest::Approx(std::cos(0.6)).epsilon(1e-12));
         CHECK(dvec.y / norm(dvec) == doctest::Approx(std::sin(0.6)).epsilon(1e-12));

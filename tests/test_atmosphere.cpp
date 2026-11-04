@@ -1,5 +1,6 @@
 #include <doctest.h>
 #include <cmath>
+#include <cstdio>
 #include "core/atmosphere.h"
 #include "core/constants.h"
 #include "test_scene_util.h"
@@ -97,6 +98,7 @@ TEST_SUITE("atmosphere")
         const double expect = 5000.0 / (1.0 + k * 5000.0 * T);
 
         Vec3 one = applyExactDrag(v0, Vec3{}, k, T);
+        std::printf("[validation] drag (applyExactDrag): relative error vs v0/(1+k v0 t) %.3g\n", std::abs(norm(one) - expect) / expect);
         CHECK(norm(one) == doctest::Approx(expect).epsilon(1e-12));
         // The direction is unchanged
         CHECK(one.x / norm(one) == doctest::Approx(0.6).epsilon(1e-14));
@@ -174,6 +176,8 @@ TEST_SUITE("atmosphere")
 
         const double k = dragRate(1.0e-3, 2.0, 5000.0);
         const double expect = 5000.0 / (1.0 + k * 5000.0 * T);
+        std::printf("[validation] drag (propagateShuttle, %ld steps): relative error vs v0/(1+k v0 t) %.3g\n", stats.acceptedSteps,
+                    std::abs(norm(shuttleVel(s, 0)) - expect) / expect);
         CHECK(norm(shuttleVel(s, 0)) == doctest::Approx(expect).epsilon(1e-12));
         // direction unchanged
         CHECK(s.state.vx[0] / norm(shuttleVel(s, 0)) == doctest::Approx(0.6).epsilon(1e-12));

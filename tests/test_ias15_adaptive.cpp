@@ -1,6 +1,7 @@
 #include <doctest.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <vector>
 #include "core/bodies.h"
 #include "core/constants.h"
@@ -100,6 +101,12 @@ KeplerRun runKepler(double e, int orbits, double epsilon = 1e-9)
     r.periodError = std::abs(dM) / (TWO_PI * orbits);
     return r;
 }
+
+void logKepler(double e, int orbits, const KeplerRun& r)
+{
+    std::printf("[validation] Kepler e=%.1f, %d orbits: max|dE/E| %.3g, period error %.3g, return error %.3g, %ld steps\n",
+                e, orbits, r.maxEnergyError, r.periodError, r.returnError, r.steps);
+}
 }
 
 TEST_SUITE("ias15 adaptive: Kepler")
@@ -111,6 +118,7 @@ TEST_SUITE("ias15 adaptive: Kepler")
     TEST_CASE("e = 0: 1000 orbits")
     {
         const KeplerRun r = runKepler(0.0, 1000);
+        logKepler(0.0, 1000, r);
         CHECK(r.finalTimeError == 0.0);
         CHECK(r.maxEnergyError < 1e-12);
         CHECK(r.periodError < 1e-12);
@@ -120,6 +128,7 @@ TEST_SUITE("ias15 adaptive: Kepler")
     TEST_CASE("e = 0.5: 1000 orbits")
     {
         const KeplerRun r = runKepler(0.5, 1000);
+        logKepler(0.5, 1000, r);
         CHECK(r.finalTimeError == 0.0);
         CHECK(r.maxEnergyError < 1e-12);
         CHECK(r.periodError < 1e-12);
@@ -129,6 +138,7 @@ TEST_SUITE("ias15 adaptive: Kepler")
     TEST_CASE("e = 0.9: 1000 orbits")
     {
         const KeplerRun r = runKepler(0.9, 1000);
+        logKepler(0.9, 1000, r);
         CHECK(r.finalTimeError == 0.0);
         CHECK(r.maxEnergyError < 1e-12);
         CHECK(r.periodError < 1e-12);
@@ -184,6 +194,7 @@ TEST_SUITE("ias15 adaptive: figure-eight")
         }
         // measured: dE 1.2e-15, dL 4e-16. The return error grows linearly (4.1e-8 after 1 period, 4.0e-6 after 100)
         // because the initial data and the period have only 8 digits; it is the same at epsilon 1e-9 and 1e-11.
+        std::printf("[validation] figure-eight, 100 periods: max|dE/E| %.3g, max|dL| %.3g, max return deviation %.3g\n", maxdE, maxdL, maxdev);
         CHECK(maxdE < 1e-12);
         CHECK(maxdL < 1e-12);
         CHECK(maxdev < 1e-5);

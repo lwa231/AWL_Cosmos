@@ -1,6 +1,7 @@
 #include <doctest.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include "core/bodies.h"
 #include "core/diagnostics.h"
 #include "core/gravity.h"
@@ -31,6 +32,19 @@ double circularErrorAfterOnePeriod(int steps)
     for (int k = 0; k < steps; ++k) stepKDK(b.state, b.mu, a, dt);
     return std::hypot(b.state.x[1] - 1.0, b.state.y[1]);
 }
+
+// Same but e = 0.5 started at periapsis (r = 0.5, v = sqrt(3)); distance from the start after one period.
+double eccentricErrorAfterOnePeriod(int steps)
+{
+    Bodies b;
+    b.add(body(1.0, 0, 0, 0, 0));
+    b.add(body(0.0, 0.5, 0, 0, std::sqrt(3.0)));
+    Accel a;
+    computeAccelerations(b.state, b.mu, a);
+    const double dt = TWO_PI / steps;
+    for (int k = 0; k < steps; ++k) stepKDK(b.state, b.mu, a, dt);
+    return std::hypot(b.state.x[1] - 0.5, b.state.y[1]);
+}
 }
 
 TEST_SUITE("kdk")
@@ -45,6 +59,17 @@ TEST_SUITE("kdk")
         const double ratio = circularErrorAfterOnePeriod(1000) / circularErrorAfterOnePeriod(2000);
         CHECK(ratio > 3.5);
         CHECK(ratio < 4.5);
+    }
+
+    TEST_CASE("second order: halving dt cuts the e = 0.5 error by about 4 (plan 14: Kepler e = 0.5, halve dt)")
+    {
+        const double e1 = eccentricErrorAfterOnePeriod(2000), e2 = eccentricErrorAfterOnePeriod(4000), e3 = eccentricErrorAfterOnePeriod(8000);
+        std::printf("[validation] KDK e=0.5 order: error %.4g (2000 steps), %.4g (4000), %.4g (8000); ratios %.4f, %.4f\n",
+                    e1, e2, e3, e1 / e2, e2 / e3);
+        CHECK(e1 / e2 > 3.5);
+        CHECK(e1 / e2 < 4.5);
+        CHECK(e2 / e3 > 3.5);
+        CHECK(e2 / e3 < 4.5);
     }
 
     TEST_CASE("eccentric orbit e = 0.5: returns to periapsis, energy stays bounded")

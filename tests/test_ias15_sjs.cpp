@@ -1,6 +1,7 @@
 #include <doctest.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <vector>
 #include "core/bodies.h"
 #include "core/constants.h"
@@ -249,7 +250,7 @@ TEST_SUITE("ias15 adaptive: Sun-Jupiter-Saturn")
         CHECK(std::abs(A_SATURN_OSC / SATURN.a - 1.0) < 5e-4);
     }
 
-    TEST_CASE("Great Inequality: Jupiter's osculating a oscillates with a period of 880-1000 yr; a tighter epsilon agrees to 0.1%")
+    TEST_CASE("Great Inequality: Jupiter's osculating a oscillates with a period of 880-940 yr; a tighter epsilon agrees to 0.1%")
     {
         Bodies b1 = makeSystem(A_JUPITER_OSC, A_SATURN_OSC);
         const Series s1 = runSystem(b1, 1e-9, 6000);
@@ -268,12 +269,15 @@ TEST_SUITE("ias15 adaptive: Sun-Jupiter-Saturn")
         const double pPhi = TWO_PI / std::abs(slope(phi));
 
         // Measured: period 937.4 yr at both epsilon 1e-9 (29446 steps) and 1e-11 (53564 steps), amplitude 2.29e-4 AU,
-        // resonance angle period 881.0 yr, energy error 2.7e-15 and 1.7e-15 over 6000 yr. The windows are the physical
-        // expectation (about 880-940 yr, which is 884 yr plus the precession of the perihelia) with 6 % of margin around
-        // the measurement, so a change of summation order or of libm cannot flip them; the real regression guards are
-        // the epsilon agreement (0.1 %) and the energy.
+        // resonance angle period 881.0 yr, energy error 2.7e-15 and 1.7e-15 over 6000 yr. The window for Jupiter's a is the
+        // plan's 880-940 yr (884 yr plus the precession of the perihelia); the measurement is 2.6 yr inside its upper edge,
+        // which is 1e-11 of rounding noise away from the epsilon rerun, so a libm change cannot flip it. The other regression
+        // guards are the epsilon agreement (0.1 %) and the energy.
+        std::printf("[validation] Great Inequality 6000 yr: period %.2f yr (eps 1e-9, %ld steps), %.2f yr (eps 1e-11, %ld steps), difference %.3g; "
+                    "resonance angle period %.2f yr; amplitude %.4g AU; energy error %.3g / %.3g\n",
+                    p1, s1.steps, p2, s2.steps, std::abs(p1 - p2) / p1, pPhi, amp1, s1.maxEnergyError, s2.maxEnergyError);
         CHECK(p1 > 880.0);
-        CHECK(p1 < 1000.0);
+        CHECK(p1 < 940.0); // plan 14: 880-940 yr
         CHECK(p1 > pPhi); // slower than the pure resonance angle
         CHECK(std::abs(p1 - p2) < 0.001 * p1);
         CHECK(std::abs(amp1 - amp2) < 0.01 * amp1);
