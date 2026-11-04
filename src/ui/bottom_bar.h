@@ -59,6 +59,10 @@ public:
     virtual bool controllerTickEditable() const { return runState() != RunState::Running; }   // only while not running
     virtual bool infiniteFuel() const { return false; }
     virtual void setInfiniteFuel(bool) {}
+    // "Slow down for any shuttle impact" (plan 8 item 4): without it only the followed or selected shuttle and the body pairs
+    // slow the warp down.
+    virtual bool slowDownAnyShuttle() const { return false; }
+    virtual void setSlowDownAnyShuttle(bool) {}
 };
 
 // A short history of one-line messages (events, notes). Messages are pushed by the app; the bar shows the latest and
@@ -91,18 +95,22 @@ struct ToolbarState {
     bool stats = false;
 };
 
-// Overlay switches of the view window (plan 9.5). Placeholders until M7: the renderer does not draw them yet, so the
-// checkboxes stay disabled while overlaysAvailable is false.
+// Overlay switches of the view window (plan 9.5). The app copies them into the overlay builder and the renderer arrays each
+// frame. overlaysAvailable false greys the checkboxes out (a host without overlays).
 struct ViewOverlays {
-    bool overlaysAvailable = false;
+    bool overlaysAvailable = true;
     bool velocityArrows = false;
     bool accelerationArrows = false;
     bool trails = false;
     bool osculatingOrbits = false;
     bool predictedPath = false;
     bool gravityRings = false;
-    bool hillSoiRoche = false;
+    bool hill = false;
+    bool soi = false;
+    bool roche = false;
     bool atmospheres = false;
+    float arrowLengthPx = 80.0f;   // the length of the longest arrow on screen
+    int arrowScaling = 1;          // 0 linear, 1 sqrt, 2 log (app::ArrowScale order)
 };
 
 class BottomBar {

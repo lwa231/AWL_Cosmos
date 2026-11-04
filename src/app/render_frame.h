@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include "app/explosion_frame.h"
 
 namespace cosmos {
 namespace app {
@@ -91,6 +92,42 @@ struct LineBatch {
     }
 };
 
+// ---- M7 overlays that read the body list rather than stream lines (plan 9.5) --------------------------------------------
+
+// One gravity source of the well-ring pass (plan 9.5): Phi(x) = -sum mu_j / max(|x - x_j|, R_j). Camera-relative metres.
+struct RenderWell {
+    float x = 0.0f, y = 0.0f;   // camera-relative position [m]
+    float radius = 1.0f;        // R_j [m]: inside it the potential is flat (the field of an overlapped body is not 1/r)
+    float mu = 0.0f;            // G m [m^3/s^2]. A float is enough: 1e20 is far inside its range and 7 digits suit a picture
+};
+
+// Look of the ring pass. u = log(-Phi) [Phi in m^2/s^2]; a band edge falls at every 1/bandsPerUnit in u.
+struct WellStyle {
+    float bandsPerUnit = 1.6f;    // k: lines per e-fold of -Phi
+    float rampLow = 12.0f;        // u at or below which the background is the plain clear colour
+    float rampHigh = 24.0f;       // u at which the depth tint is full (u = 22 is a star surface in Lucerna, 18 a planet's)
+    float lineAlpha = 0.45f;      // opacity of a band line before the depth gain
+    float tint[3] = {0.10f, 0.065f, 0.24f};   // colour added to the background at full depth
+    float line[3] = {0.45f, 0.55f, 0.90f};   // band line colour
+};
+
+// An atmosphere bubble (plan 5.5, 9.5): a radial gradient disc from R to R + top, tinted per body.
+struct RenderAtmosphere {
+    float x = 0.0f, y = 0.0f;   // camera-relative centre of the body [m]
+    float radius = 1.0f;        // R [m]
+    float top = 0.0f;           // height at which the density reaches the 1e-6 kg/m^3 cutoff [m]; 0 = no bubble
+    float scaleHeight = 1.0f;   // H [m]: density falls as exp(-h / H)
+    RenderColour tint{0.45f, 0.65f, 1.0f};
+};
+
+// Hill, sphere-of-influence and Roche circles (plan 5.8, 9.5): outlines of constant pixel width, one style per kind.
+enum class CircleKind : std::uint32_t { Hill = 0, Soi = 1, Roche = 2 };
+struct RenderCircle {
+    float x = 0.0f, y = 0.0f;   // camera-relative centre [m]
+    float radius = 1.0f;        // [m]
+    CircleKind kind = CircleKind::Hill;
+};
+
 struct RenderFrame {
     int viewportWidth = 0;      // framebuffer size in pixels
     int viewportHeight = 0;
@@ -108,6 +145,15 @@ struct RenderFrame {
     std::vector<RenderShuttle> shuttles;
     LineBatch underlay;         // drawn before bodies (trails, orbits, Hill/SOI circles; plan 9.4 steps 4-5)
     LineBatch overlay;          // drawn after shuttles (velocity/acceleration arrows; plan 9.4 step 9)
+    ExplosionFrame explosions;  // fragments and sparks (plan 9.4 step 8, 9.7); filled by ExplosionSystem::update, drawn by Renderer::drawExplosions
+
+    // M7 passes. Each stays empty when its toggle is off; the renderer then skips the pass.
+    std::vector<RenderWell> wells;              // gravity-well rings (step 2). One entry per source body
+    WellStyle wellStyle;
+    std::vector<RenderAtmosphere> atmospheres;  // atmosphere bubbles (step 3)
+    float atmosphereAlpha = 0.70f;              // opacity at the surface
+    float atmospherePower = 0.30f;              // alpha = atmosphereAlpha * (rho / rho0)^power: a small power keeps the thin air visible
+    std::vector<RenderCircle> circles;          // Hill / SOI / Roche outlines (step 5)
 
     // Empties every array but keeps the capacity, so the per-frame fill does not reallocate.
     void clearObjects()
@@ -117,6 +163,10 @@ struct RenderFrame {
         shuttles.clear();
         underlay.clear();
         overlay.clear();
+        wells.clear();
+        atmospheres.clear();
+        circles.clear();
+        explosions.clear();
     }
 };
 

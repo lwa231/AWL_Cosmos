@@ -1,0 +1,154 @@
+#version 450 core
+// Explosion fragments (plan 9.7, 6.5): one invocation per pool slot. Positions and velocities are floats RELATIVE to the
+// explosion's anchor, in the frame that translates with the body the explosion happened on (the anchor itself is a double on
+// the CPU). Per fixed substep (kSubstep sim seconds, at most kMaxSub per frame, so a very high warp uses longer substeps):
+//   drag half step (exact, plan 5.6) - gravity half kick - drift - gravity half kick - drag half step
+// Gravity: the listed bodies (point masses, softened inside their radius) minus the acceleration of the frame's own body due to
+// the others (the CPU sends it as the "indirect" term, so the star and moons enter as tidal differences). Drag: the densest
+// atmosphere among the bodies, rho(h) = rho0 exp(-h/H), air co-rotating with the body, k = rho * ballistic.
+// A fragment that reaches a surface stays there, turning with the body, until its life ends. Visual only: nothing here feeds
+// back into the simulation.
+//
+// Layouts: shaders mirror app/explosion_frame.h (FragmentGpu 64 B, ExplosionGpu 224 B).
+
+layout(local_size_x = 64) in;
+
+struct Fragment {
+    float px, py, vx, vy;
+    float simAge, realAge, life, minReal;
+    float ballistic, size;
+    uint slot, serial, landed, seed;
+    float pad0, pad1;
+};
+struct Body {
+    float x, y, mu, radius;
+    float indX, indY, vx, vy;
+    float rho0, scaleHeight, spin, altitude;
+};
+struct Explosion {
+    float anchorX, anchorY, dtSim, dtReal;
+    uint serial, bodyCount, pad0, pad1;
+    Body bodies[4];
+};
+
+layout(std430, binding = 8) buffer FragmentBuffer { Fragment frags[]; };
+layout(std430, binding = 9) readonly buffer ExplosionBuffer { Explosion explosions[]; };
+layout(location = 0) uniform uint uCount;
+
+const float SUBSTEP = 0.025;       // s, the fixed substep (about one 60 Hz frame at 1x)
+const int   MAX_SUB = 24;          // per frame
+const float CUTOFF_RHO = 1.0e-6;   // kg/m^3 (plan 5.5)
+
+// Altitude of point p (relative to the anchor) above the surface of body b, at time tau into the frame. The anchor's altitude
+// is exact (double on the CPU); only the small difference is formed here, so the 6e6 m magnitudes of a planet's centre do not
+// cost precision.
+float altitudeOf(Body b, vec2 p, float tau, out vec2 centre)
+{
+    vec2 c0 = vec2(b.x, b.y);
+    vec2 vb = vec2(b.vx, b.vy);
+    centre = c0 + vb * tau;
+    float n0 = length(c0), n1 = length(centre);
+    float a0 = b.altitude + (2.0 * dot(c0, vb) * tau + dot(vb, vb) * tau * tau) / max(n0 + n1, 1.0);
+    float d = length(centre - p);
+    return a0 + (dot(p, p) - 2.0 * dot(centre, p)) / max(d + n1, 1.0);
+}
+
+vec2 gravity(Explosion e, vec2 p, float tau)
+{
+    vec2 a = vec2(0.0);
+    for (uint k = 0u; k < e.bodyCount; ++k) {
+        Body b = e.bodies[k];
+        vec2 c = vec2(b.x, b.y) + vec2(b.vx, b.vy) * tau;
+        vec2 d = c - p;
+        float r2 = max(dot(d, d), b.radius * b.radius);
+        float r = sqrt(r2);
+        a += d / r * (b.mu / r2) - vec2(b.indX, b.indY);
+    }
+    return a;
+}
+
+vec2 applyDrag(Explosion e, vec2 v, vec2 p, float tau, float ballistic, float dt)
+{
+    float bestRho = 0.0;
+    vec2 vair = vec2(0.0);
+    for (uint k = 0u; k < e.bodyCount; ++k) {
+        Body b = e.bodies[k];
+        if (b.rho0 <= CUTOFF_RHO || b.scaleHeight <= 0.0) continue;
+        vec2 c;
+        float h = altitudeOf(b, p, tau, c);
+        if (h >= b.scaleHeight * log(b.rho0 / CUTOFF_RHO)) continue;   // above the top of the air
+        float rho = b.rho0 * exp(-max(h, 0.0) / b.scaleHeight);
+        if (rho > bestRho) {
+            bestRho = rho;
+            vec2 d = p - c;
+            vair = vec2(b.vx, b.vy) + b.spin * vec2(-d.y, d.x);
+        }
+    }
+    if (bestRho <= 0.0) return v;
+    float k = bestRho * ballistic;
+    vec2 rel = v - vair;
+    return vair + rel / (1.0 + k * length(rel) * dt);   // exact solution of dv/dt = -k |v| v at fixed rho
+}
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uCount) return;
+    if (frags[i].serial == 0u) return;
+    uint slot = frags[i].slot;
+    if (slot >= 64u || explosions[slot].serial != frags[i].serial) { frags[i].serial = 0u; return; }   // its explosion is gone
+
+    Fragment f = frags[i];
+    Explosion e = explosions[slot];
+    f.simAge += e.dtSim;
+    f.realAge += e.dtReal;
+    if (min(f.simAge / f.life, f.realAge / f.minReal) >= 1.0) {   // sim lifetime over AND the minimum real visibility passed
+        frags[i].serial = 0u;
+        return;
+    }
+
+    if (e.dtSim > 0.0) {
+        int nSub = clamp(int(ceil(e.dtSim / SUBSTEP)), 1, MAX_SUB);
+        float h = e.dtSim / float(nSub);
+        vec2 p = vec2(f.px, f.py);
+        vec2 v = vec2(f.vx, f.vy);
+        uint landed = f.landed;
+        float tau = 0.0;
+        for (int s = 0; s < nSub; ++s) {
+            if (landed != 0u) {
+                Body b = e.bodies[landed - 1u];
+                vec2 c;
+                float alt = altitudeOf(b, p, tau, c);
+                vec2 d = p - c;
+                float th = b.spin * h;
+                float s2 = sin(0.5 * th);
+                p += (-2.0 * s2 * s2) * d + sin(th) * vec2(-d.y, d.x) + vec2(b.vx, b.vy) * h;   // turn with the body
+                tau += h;
+                alt = altitudeOf(b, p, tau, c);
+                vec2 dir = normalize(p - c);
+                p -= dir * alt;                                                                 // stay on the surface
+                continue;
+            }
+            v = applyDrag(e, v, p, tau, f.ballistic, 0.5 * h);
+            v += gravity(e, p, tau) * (0.5 * h);
+            p += v * h;
+            tau += h;
+            v += gravity(e, p, tau) * (0.5 * h);
+            v = applyDrag(e, v, p, tau, f.ballistic, 0.5 * h);
+            for (uint k = 0u; k < e.bodyCount; ++k) {   // touched a surface: rest there
+                Body b = e.bodies[k];
+                vec2 c;
+                float alt = altitudeOf(b, p, tau, c);
+                if (alt < 0.0) {
+                    p -= normalize(p - c) * alt;
+                    v = vec2(0.0);
+                    landed = k + 1u;
+                    break;
+                }
+            }
+        }
+        f.px = p.x; f.py = p.y; f.vx = v.x; f.vy = v.y;
+        f.landed = landed;
+    }
+    frags[i] = f;
+}
