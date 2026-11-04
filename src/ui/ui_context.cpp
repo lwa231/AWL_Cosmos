@@ -65,6 +65,7 @@ bool UiContext::init(GLFWwindow* window, const UiConfig& config)
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;   // no imgui.ini in the working folder; window layout is code-driven for now
 
+    window_ = window;
     dpiScale_ = config.scaleOverride > 0.0f ? config.scaleOverride : ImGui_ImplGlfw_GetContentScaleForWindow(window);
     if (!(dpiScale_ > 0.25f && dpiScale_ < 8.0f)) dpiScale_ = 1.0f;
 
@@ -96,6 +97,17 @@ void UiContext::shutdown()
     }
     initialised_ = false;
     fontMedium_ = nullptr;
+}
+
+void UiContext::setScale(float scale)
+{
+    if (!initialised_ || !window_) return;
+    float s = scale > 0.0f ? scale : ImGui_ImplGlfw_GetContentScaleForWindow(window_);
+    if (!(s > 0.25f && s < 8.0f)) s = 1.0f;
+    if (s == dpiScale_) return;
+    dpiScale_ = s;
+    applyTheme(dpiScale_);
+    ImGui::GetStyle().FontScaleDpi = dpiScale_;
 }
 
 void UiContext::newFrame()

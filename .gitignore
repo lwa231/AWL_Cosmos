@@ -39,3 +39,5 @@ Thumbs.db
 
 #Planning Files for Claude
 AWL_Cosmos_Plan/
+# Per-user settings written next to the exe when run from the source folder
+settings.json

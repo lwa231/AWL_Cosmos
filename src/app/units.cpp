@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include "app/display_prefs.h"
 #include "core/constants.h"
 #include "core/kinds.h"
 
@@ -227,6 +228,29 @@ int findUnit(const Table& t, const std::string& token)
     return -1;
 }
 
+// The unit the display preference (Settings > Display & units) asks for, as an index into the table; -1 = automatic.
+int preferredUnit(const Table& t, Quantity q)
+{
+    const DisplayPrefs& p = displayPrefs();
+    const char* name = nullptr;
+    if (q == Quantity::Length) {
+        switch (p.length) {
+        case LengthUnit::Metres: name = "m"; break;
+        case LengthUnit::Kilometres: name = "km"; break;
+        case LengthUnit::AU: name = "AU"; break;
+        case LengthUnit::Auto: break;
+        }
+    } else if (q == Quantity::BodyMass) {
+        switch (p.mass) {
+        case MassUnit::Kilograms: name = "kg"; break;
+        case MassUnit::EarthMasses: name = "M_earth"; break;
+        case MassUnit::SolarMasses: name = "M_sun"; break;
+        case MassUnit::Auto: break;
+        }
+    }
+    return name ? findUnit(t, name) : -1;
+}
+
 std::string trimmed(std::string_view s)
 {
     std::size_t b = 0, e = s.size();
@@ -442,6 +466,7 @@ std::string formatQuantity(double value, Quantity q, const char* forceUnit, int 
     const Table tab = tableOf(q);
     int idx = -1;
     if (forceUnit != nullptr && forceUnit[0] != '\0') idx = findUnit(tab, normalise(forceUnit));
+    if (idx < 0) idx = preferredUnit(tab, q);
     const Unit& u = idx >= 0 ? tab.units[static_cast<std::size_t>(idx)] : tab.units[autoUnit(q, std::fabs(value))];
     return formatNumber(value / u.factor, sig) + " " + u.name;
 }

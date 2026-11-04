@@ -2,6 +2,7 @@
 // Readout formatting for the bottom bar and panels (plan sections 10.2, 10.3). Pure functions, no GL, no locale
 // dependence beyond the C locale the program starts in (numbers use '.' and no thousands separators).
 #include <string>
+#include "app/display_prefs.h"
 
 namespace cosmos {
 namespace app {
@@ -23,9 +24,13 @@ std::string formatTimeRate(double simSecondsPerSecond);
 // moment that has not happened yet. A negative time is the same format of its magnitude with a leading '-': t = -1 s is
 // "-Day 0  00:00:01". Non-finite input gives "Day --".
 std::string formatSimDate(double tSeconds);
+// The same in a chosen format (Settings > Display & units): DayOnly "Day 123", YearDay "Year 2, Day 14  04:05:06". The one-argument
+// form above follows displayPrefs().date (DayClock unless the settings say otherwise).
+std::string formatSimDate(double tSeconds, DateFormat format);
 
 // Length in metres in the largest fitting unit of m, km, Mm, Gm, AU with 3 significant figures:
-// "845 m", "620 km", "13.6 Gm", "0.668 AU" (AU from 1e11 m on). Negative values get a '-'.
+// "845 m", "620 km", "13.6 Gm", "0.668 AU" (AU from 1e11 m on). Negative values get a '-'. A fixed length unit in displayPrefs()
+// (m, km or AU) replaces the automatic choice.
 std::string formatDistance(double metres);
 
 // Speed in m/s below 1 km/s, km/s from there on, 3 significant figures: "850 m/s", "2.17 km/s".

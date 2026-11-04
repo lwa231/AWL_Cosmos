@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -20,6 +21,12 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#ifdef _WIN32
+// winmm's timer resolution call, declared here instead of including <windows.h> (which defines macros such as `far`)
+extern "C" __declspec(dllimport) unsigned int __stdcall timeBeginPeriod(unsigned int ms);
+extern "C" __declspec(dllimport) unsigned int __stdcall timeEndPeriod(unsigned int ms);
+extern "C" __declspec(dllimport) void __stdcall Sleep(unsigned long ms);   // std::this_thread::sleep_for stays at 15 ms here
+#endif
 #include "app/bench_scene.h"
 #include "app/bmp_writer.h"
 #include "app/camera.h"
@@ -31,6 +38,7 @@
 #include "app/perf_stats.h"
 #include "app/presets.h"
 #include "app/render_frame.h"
+#include "app/settings.h"
 #include "app/run_control.h"
 #include "app/slow_down.h"
 #include "app/sim_driver.h"
@@ -42,6 +50,8 @@
 #include "ui/bottom_bar.h"
 #include "ui/labels.h"
 #include "ui/left_panel.h"
+#include "ui/main_menu.h"
+#include "ui/settings_panel.h"
 #include "ui/theme.h"
 #include "ui/ui_context.h"
 
@@ -49,6 +59,16 @@ using namespace cosmos;
 using namespace cosmos::app;
 
 namespace {
+
+// One millisecond of sleep (about two with the 1 ms timer resolution that run() requests on Windows).
+void sleepOneMs()
+{
+#ifdef _WIN32
+    Sleep(1);
+#else
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
+}
 
 constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 720;
@@ -67,11 +87,16 @@ std::string lower(std::string s)
 struct Options {
     int frames = -1;                  // --frames N: exit after N frames
     std::string screenshot;           // --screenshot path.bmp: write the last frame's back buffer
-    bool vsync = true;                // --no-vsync turns it off
+    bool vsync = true;                // --no-vsync turns it off (otherwise the saved setting decides)
     double mpp = 0.0;                 // --mpp X: initial metres per pixel (0 = fit the whole system, or frame the --follow target)
     int width = kDefaultWidth, height = kDefaultHeight;   // --size W H: initial window size
     bool glDebug = false;             // --gl-debug: request a debug context and report GL errors (always on in Debug builds)
     std::string scene = "scenes/lucerna.json";   // --scene path (relative to the working folder, like shaders/) or a preset id (empty, lucerna)
+    bool sceneGiven = false;          // --scene was on the command line: no start screen
+    bool menu = false;                // --menu: show the start screen even when a scripted run would skip it
+    std::string settingsPath;         // --settings FILE: the settings file (default settings.json in the working folder)
+    bool warpGiven = false;           // --warp was on the command line: it replaces the saved default warp
+    bool threadsGiven = false;
     double warp = 1.0;                // --warp X: initial time warp
     std::string follow;               // --follow NAME: start following this body or shuttle
     double fixedDt = 0.0;             // --fixed-dt S: use S seconds per frame instead of the real time (repeatable screenshots)
@@ -142,11 +167,13 @@ bool parseArgs(int argc, char** argv, Options& o)
         else if (a == "--screenshot" && i + 1 < argc) o.screenshot = argv[++i];
         else if (a == "--mpp" && i + 1 < argc) o.mpp = std::atof(argv[++i]);
         else if (a == "--size" && i + 2 < argc) { o.width = std::atoi(argv[++i]); o.height = std::atoi(argv[++i]); }
-        else if (a == "--scene" && i + 1 < argc) o.scene = argv[++i];
-        else if (a == "--warp" && i + 1 < argc) o.warp = std::atof(argv[++i]);
+        else if (a == "--scene" && i + 1 < argc) { o.scene = argv[++i]; o.sceneGiven = true; }
+        else if (a == "--menu") o.menu = true;
+        else if (a == "--settings" && i + 1 < argc) o.settingsPath = argv[++i];
+        else if (a == "--warp" && i + 1 < argc) { o.warp = std::atof(argv[++i]); o.warpGiven = true; }
         else if (a == "--follow" && i + 1 < argc) o.follow = argv[++i];
         else if (a == "--fixed-dt" && i + 1 < argc) o.fixedDt = std::atof(argv[++i]);
-        else if (a == "--threads" && i + 1 < argc) o.threads = std::atoi(argv[++i]);
+        else if (a == "--threads" && i + 1 < argc) { o.threads = std::atoi(argv[++i]); o.threadsGiven = o.threads > 0; }
         else if (a == "--ui-scale" && i + 1 < argc) o.uiScale = static_cast<float>(std::atof(argv[++i]));
         else if (a == "--open" && i + 1 < argc) o.open = argv[++i];
         else if (a == "--screenshot-prev" && i + 1 < argc) o.screenshotPrev = argv[++i];
@@ -204,7 +231,7 @@ bool parseArgs(int argc, char** argv, Options& o)
         }
         else {
             std::cerr << "Unknown or incomplete option: " << a << "\n"
-                      << "Usage: AWL_Cosmos [--scene file.json] [--warp X] [--follow NAME] [--mpp X] [--size W H] [--frames N]\n"
+                      << "Usage: AWL_Cosmos [--scene file.json|preset] [--menu] [--settings FILE] [--warp X] [--follow NAME] [--mpp X] [--size W H] [--frames N]\n"
                       << "                  [--screenshot file.bmp] [--screenshot-prev file.bmp] [--fixed-dt S] [--threads N]\n"
                       << "                  [--no-vsync] [--gl-debug] [--no-ui] [--ui-scale X] [--open view,sim,stats,log,edit,add]\n"
                       << "                  [--click X,Y@FRAME]... [--slow-down-at FRAME] [--do COMMAND@FRAME]...\n"
@@ -261,6 +288,21 @@ struct App {
     ui::LabelOptions labelOptions;
     SlowDown slowDown;               // warp step-down for approaching impacts (M7, plan 8)
     ExplosionSystem explosions;      // explosion registry; fills RenderFrame::explosions (M7, plan 9.7)
+    ui::MainMenu menu;               // start screen and Esc menu (V1.1 step 1)
+    ui::SettingsPanel settingsPanel;
+    Settings prefs;                  // the user's settings (settings.json); the Settings window edits this
+    Settings applied;                // what applyPrefsChanges has put into effect
+    std::string prefsPath;           // where they are saved
+    bool prefsChanged = false;       // edited since the last apply
+    bool prefsDirty = false;         // edited since the last save
+    bool vsyncLocked = false;        // --no-vsync: the setting does not turn vsync on in this run
+    bool uiScaleLocked = false;      // --ui-scale: the setting does not change the scale in this run
+    bool threadsLocked = false;      // --threads: the setting does not change the thread count in this run
+    bool warpLocked = false;         // --warp: the saved default warp is not used in this run
+    int launchMsaa = 4;              // the sample count of this run's window
+    double defaultWarp = 1.0;        // the time rate a freshly opened scene starts at
+    bool menuResumeRun = false;      // the Esc menu paused a running simulation: Resume starts it again
+    int fpsCapActive = 0;            // frame-rate cap in effect (frames per second, 0 = none)
     ThreadPool workers;              // frame-building workers (overlay geometry, line upload); the main thread takes part
     OverlayBuilder overlays;         // arrows, trails, osculating orbits, predicted path (M7, plan 9.5)
     RadiiCache radiiCache;           // throttled Hill / SOI / Roche radii for the circles
@@ -529,6 +571,12 @@ void clickPick(App& app)
 // ---------------------------------------------------------------------------------------------------------------
 // Run control glue (M6): what Start / Pause / Stop do beyond RunControl itself
 
+// The controller tick a scene runs with: its own when the scene file sets one, otherwise the default of the Settings window.
+double sceneTick(const App& app, const SceneSettings& s)
+{
+    return s.controllerTick_s == SceneSettings().controllerTick_s ? app.prefs.controllerTick : s.controllerTick_s;
+}
+
 // Re-applies the sim window's settings to the current driver's simulation (a rebuild starts from the scene's settings).
 void applyPrefs(App& app)
 {
@@ -625,8 +673,9 @@ void onSceneReplaced(App& app)
     fillNumberKeys(app);
     const SceneSettings& settings = app.rc.editor().scene().settings;
     app.infiniteFuel = settings.infiniteFuel;
-    app.controllerTick = settings.controllerTick_s;
+    app.controllerTick = sceneTick(app, settings);
     applyPrefs(app);
+    app.rc.driver().warp().set(app.defaultWarp);   // a freshly opened scene starts at the default time rate
     app.lastFollowedBody = 0;
     app.pendingFrame = {};
     app.camera.stopFollowing();
@@ -634,6 +683,102 @@ void onSceneReplaced(App& app)
     app.camera.setCentreWorld({0.0, 0.0, 0.0});
     app.camera.setMetresPerPixel(app.state().bodies.empty() ? 1.0e7 : fitSystemMpp(app));
     resetStats(app);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Menus and settings (V1.1 step 1)
+
+int hardwareThreads()
+{
+    const int hw = static_cast<int>(std::thread::hardware_concurrency());
+    return std::max(1, std::min(kMaxThreadSetting, hw > 0 ? hw : 1));
+}
+
+// Puts the settings that differ from the last applied ones into effect (all of them when `initial`).
+void applyPrefsChanges(App& app, bool initial)
+{
+    const Settings& n = app.prefs;
+    const Settings& o = app.applied;
+    applyDisplayPrefs(n);
+    if (!app.vsyncLocked && (initial || n.vsync != o.vsync)) glfwSwapInterval(n.vsync ? 1 : 0);
+    if (!app.uiScaleLocked && (initial || n.uiScale != o.uiScale)) app.ui.setScale(n.uiScale);
+    app.fpsCapActive = n.fpsCap;
+    if (initial || n.autoSlowDown != o.autoSlowDown) app.slowDown.options.enabled = n.autoSlowDown;
+    if (initial || n.slowDownAnyShuttle != o.slowDownAnyShuttle) app.slowDown.options.anyShuttle = n.slowDownAnyShuttle;
+    if (!initial && !app.threadsLocked && n.threads != o.threads) {
+        app.threads = n.threads > 0 ? std::min(kMaxThreadSetting, n.threads) : hardwareThreads();
+        applyPrefs(app);
+    }
+    if (!app.warpLocked && (initial || n.defaultWarp != o.defaultWarp)) app.defaultWarp = n.defaultWarp;
+    if (!initial && n.controllerTick != o.controllerTick && !app.rc.running()) {   // the tick cannot change under a running simulation
+        app.controllerTick = n.controllerTick;
+        applyPrefs(app);
+    }
+    app.applied = n;
+}
+
+void savePrefsNow(App& app)
+{
+    std::string err;
+    if (!saveSettings(app.prefsPath, app.prefs, err)) app.say("Cannot save the settings: " + err);
+    app.prefsDirty = false;
+}
+
+// The Esc menu: pauses a running simulation (Resume continues it) and shows the centred menu over the dimmed scene.
+void openPauseMenu(App& app)
+{
+    app.menuResumeRun = app.rc.running();
+    if (app.menuResumeRun) runPause(app);
+    app.menu.showPause(app.rc.editor().scene().name, app.menuResumeRun);
+}
+
+void closePauseMenu(App& app, bool resume)
+{
+    app.menu.hide();
+    app.settingsPanel.close();
+    const bool again = app.menuResumeRun && resume;
+    app.menuResumeRun = false;
+    if (again) runStart(app);
+}
+
+// "Return to menu": stops the run (the scene is back as it was at Start) and shows the start screen.
+void returnToMenu(App& app)
+{
+    app.settingsPanel.close();
+    app.menuResumeRun = false;
+    if (app.rc.state() != RunState::Stopped) runStop(app);
+    app.menu.showStart();
+}
+
+// Esc: closes Settings, resumes from the menu, stops following, and with nothing to stop opens the menu.
+void escapePressed(App& app)
+{
+    if (app.settingsPanel.isOpen()) { app.settingsPanel.close(); return; }
+    switch (app.menu.mode()) {
+    case ui::MenuMode::Pause: closePauseMenu(app, true); return;
+    case ui::MenuMode::Start: return;
+    case ui::MenuMode::Hidden: break;
+    }
+    if (app.camera.following().active()) { app.camera.stopFollowing(); app.say("Stopped following"); return; }
+    if (app.ui.initialised()) openPauseMenu(app);
+}
+
+void handleMenuRequest(App& app, const ui::MenuRequest& req)
+{
+    switch (req.action) {
+    case ui::MenuAction::None: break;
+    case ui::MenuAction::NewPreset:
+    case ui::MenuAction::LoadFile: {
+        const bool ok = req.action == ui::MenuAction::NewPreset ? app.panel.newScene(req.arg) : app.panel.loadSceneFile(req.arg);
+        if (ok) { app.menu.hide(); app.menu.setMessage(std::string(), false); }
+        else app.menu.setMessage(app.panel.sceneMessage(), true);
+        break;
+    }
+    case ui::MenuAction::Settings: app.settingsPanel.show(ui::SettingsTab::Graphics); break;
+    case ui::MenuAction::Resume: closePauseMenu(app, true); break;
+    case ui::MenuAction::ReturnToMenu: returnToMenu(app); break;
+    case ui::MenuAction::Quit: app.quit = true; break;
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -651,7 +796,7 @@ void framebufferSizeCallback(GLFWwindow* w, int width, int height)
 void scrollCallback(GLFWwindow* w, double, double dy)
 {
     auto* app = static_cast<App*>(glfwGetWindowUserPointer(w));
-    if (app->fbW <= 0 || dy == 0.0 || app->ui.wantsMouse()) return;   // the wheel scrolls a panel, not the camera
+    if (app->fbW <= 0 || dy == 0.0 || app->ui.wantsMouse() || app->menu.active()) return;   // the wheel scrolls a panel, not the camera
     const double k = app->pixelScale();
     app->camera.zoomAtWindow(dy, app->cursorX * k, app->cursorY * k, app->viewport());
 }
@@ -676,7 +821,7 @@ void mouseButtonCallback(GLFWwindow* w, int button, int action, int)
     if (button != GLFW_MOUSE_BUTTON_LEFT && button != GLFW_MOUSE_BUTTON_RIGHT) return;
     bool& down = button == GLFW_MOUSE_BUTTON_LEFT ? app->leftDown : app->rightDown;
     if (action == GLFW_PRESS) {
-        if (app->ui.wantsMouse()) return;   // the press belongs to a panel: no pan, no pick
+        if (app->ui.wantsMouse() || app->menu.active()) return;   // the press belongs to a panel or a menu: no pan, no pick
         if (!app->leftDown && !app->rightDown) app->dragPx = 0.0;
         down = true;
     } else if (action == GLFW_RELEASE) {
@@ -692,6 +837,10 @@ void keyCallback(GLFWwindow* w, int key, int, int action, int mods)
     if (action == GLFW_RELEASE || app->ui.wantsKeyboard()) return;   // typing into a field: no shortcuts
     SimDriver& d = app->rc.driver();
     const bool repeat = action == GLFW_REPEAT;
+
+    if (key == GLFW_KEY_Q && (mods & GLFW_MOD_CONTROL)) { app->quit = true; return; }   // Ctrl+Q quits from anywhere
+    if (key == GLFW_KEY_ESCAPE) { if (!repeat) escapePressed(*app); return; }
+    if (app->menu.active() || app->settingsPanel.isOpen()) return;   // the menus own the keyboard
 
     // Zoom keys may repeat; the rest act once per press.
     if (key == GLFW_KEY_EQUAL || key == GLFW_KEY_KP_ADD) { app->camera.zoomAtCentred(1.0, 0.0, 0.0); return; }
@@ -714,12 +863,6 @@ void keyCallback(GLFWwindow* w, int key, int, int action, int mods)
     case GLFW_KEY_R: setFrameMode(*app, FrameMode::FollowBody); break;
     case GLFW_KEY_H:
     case GLFW_KEY_HOME: resetView(*app); break;
-    case GLFW_KEY_ESCAPE:   // only stops following; quitting is the window close button or Ctrl+Q
-        if (app->camera.following().active()) { app->camera.stopFollowing(); app->say("Stopped following"); }
-        break;
-    case GLFW_KEY_Q:
-        if (mods & GLFW_MOD_CONTROL) app->quit = true;
-        break;
     default:
         // 1-9: follow the n-th body of the starting scene (ID order); in Lucerna 4 is Domus. The table is fixed at start,
         // so a merge never renumbers the keys; a body that has merged away leads to the body that absorbed it.
@@ -1032,6 +1175,7 @@ std::string frameLabel(const App& app)
 std::string buildTitle(const App& app, double achievedRate)
 {
     const SimDriver& d = app.rc.driver();
+    if (app.menu.mode() == ui::MenuMode::Start) return "AWL Cosmos";
     std::string t = "AWL Cosmos | " + formatSimDate(d.targetTime()) + " | ";
     switch (app.rc.state()) {
     case RunState::Stopped: t += "STOPPED"; break;
@@ -1050,7 +1194,7 @@ std::string buildTitle(const App& app, double achievedRate)
 void printHelp()
 {
     std::cout << "Keys: wheel = zoom at cursor, drag = pan, click = follow, +/- PgUp/PgDn = zoom, . / , = warp up/down, / = 1x, Space = pause,\n"
-                 "      1-9 = follow body n (4 = Domus), F / Tab (+Shift) = cycle follow target, Esc = stop following, Ctrl+Q = quit,\n"
+                 "      1-9 = follow body n (4 = Domus), F / Tab (+Shift) = cycle follow target, Esc = stop following, then the menu, Ctrl+Q = quit,\n"
                  "      0 / B / R = inertial / barycentre / relative-to-followed-body frame, H = fit the system\n";
 }
 
@@ -1128,6 +1272,29 @@ bool runCommand(App& app, const std::string& text)
         return true;
     };
 
+    if (verb == "menu") {   // menu:start | menu:pause | menu:hide (screenshots of the start screen and the Esc menu)
+        const std::string w = lower(arg);
+        if (w == "start") returnToMenu(app);
+        else if (w == "pause") { if (!app.menu.active()) openPauseMenu(app); }
+        else if (w == "hide") closePauseMenu(app, false);
+        else return fail("expected menu:start, menu:pause or menu:hide");
+        return true;
+    }
+    if (verb == "settings") {   // settings:graphics | simulation | display | controls | credits | close
+        const std::string w = lower(arg);
+        if (w == "close") { app.settingsPanel.close(); return true; }
+        const struct { const char* name; ui::SettingsTab tab; } tabs[] = {
+            {"graphics", ui::SettingsTab::Graphics}, {"simulation", ui::SettingsTab::Simulation}, {"display", ui::SettingsTab::Display},
+            {"controls", ui::SettingsTab::Controls}, {"credits", ui::SettingsTab::Credits}};
+        for (const auto& tb : tabs)
+            if (w == tb.name) { app.settingsPanel.show(tb.tab); return true; }
+        return fail("expected settings:graphics, simulation, display, controls, credits or close");
+    }
+    if (verb == "pref") {   // pref:{"display":{"lengthUnit":"AU"}}: merges JSON into the settings, as if changed in the window
+        if (!mergeSettingsJson(app.prefs, arg)) return fail("not a JSON object");
+        app.prefsChanged = app.prefsDirty = true;
+        return true;
+    }
     if (verb == "new") return app.panel.newScene(arg) || fail(app.panel.sceneMessage());
     if (verb == "load") return app.panel.loadSceneFile(arg) || fail(app.panel.sceneMessage());
     if (verb == "save") return app.panel.saveCurrent(arg) || fail(app.panel.sceneMessage());
@@ -1196,20 +1363,39 @@ int run(const Options& opt)
     const bool debugContext = opt.glDebug;
 #endif
 
+    // ---- Settings (V1.1 step 1): settings.json next to scenes/ and shaders/; a missing or damaged file means the defaults ----
+    Settings prefs;
+    const std::string prefsPath = opt.settingsPath.empty() ? defaultSettingsPath() : opt.settingsPath;
+    {
+        std::string note;
+        if (!loadSettings(prefsPath, prefs, note)) std::cerr << "Settings: " << note << "\n";
+    }
+    const bool vsync = opt.vsync && prefs.vsync;   // --no-vsync always wins
+
+    // The start screen opens when no --scene is given, unless the run is scripted (frames, benchmark, commands, ...): those keep
+    // loading the Lucerna preset as before. --menu forces the start screen.
+    const bool scripted = opt.frames >= 0 || opt.benchShuttles > 0 || !opt.commands.empty() || !opt.script.empty() || !opt.clicks.empty() ||
+                          !opt.follow.empty() || !opt.shots.empty() || !opt.screenshot.empty() || opt.fixedDt > 0.0 ||
+                          opt.benchPaceFps > 0.0;
+    const bool startScreen = opt.ui && (opt.menu || (!opt.sceneGiven && !scripted));
+
     // ---- Scene and simulation options (plan 11.1, 4.4) ----
-    // The starting scene: a preset id ("empty", "lucerna") or a scene file. The default is the Lucerna preset's file.
+    // The starting scene: a preset id ("empty", "lucerna") or a scene file. The default is the Lucerna preset's file; behind the
+    // start screen it is the empty sandbox.
+    const std::string startScene = startScreen && !opt.sceneGiven ? std::string("empty") : opt.scene;
     Scene scene;
     std::string err;
-    const bool isPresetId = opt.scene.find_first_of("/\\.") == std::string::npos;
-    if (!(isPresetId ? loadPreset(opt.scene, defaultSceneDir(), scene, err) : loadSceneFromPath(opt.scene, scene, err))) {
-        std::cerr << "Cannot load scene '" << opt.scene << "': " << err << "\n";
+    const bool isPresetId = startScene.find_first_of("/\\.") == std::string::npos;
+    if (!(isPresetId ? loadPreset(startScene, defaultSceneDir(), scene, err) : loadSceneFromPath(startScene, scene, err))) {
+        std::cerr << "Cannot load scene '" << startScene << "': " << err << "\n";
         return 1;
     }
 
     RunOptions runOptions;
     SimulationOptions& so = runOptions.sim;
     const int hw = static_cast<int>(std::thread::hardware_concurrency());
-    so.threads = std::max(1, std::min(16, opt.threads > 0 ? opt.threads : (hw > 0 ? hw : 1)));
+    const int settingThreads = prefs.threads > 0 ? prefs.threads : hw;
+    so.threads = std::max(1, std::min(16, opt.threads > 0 ? opt.threads : (settingThreads > 0 ? settingThreads : 1)));
     DriverOptions& dopt = runOptions.driver;
     if (opt.fixedDt > 0.0) dopt.physicsBudget_s = 0.0;   // repeatable runs: the physics may take as long as it needs
 
@@ -1218,7 +1404,7 @@ int run(const Options& opt)
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, debugContext ? GLFW_TRUE : GLFW_FALSE);
-    glfwWindowHint(GLFW_SAMPLES, 4);   // smooth shuttle hull edges (impostors and lines are anti-aliased analytically)
+    glfwWindowHint(GLFW_SAMPLES, prefs.msaa);   // smooth shuttle hull edges (impostors and lines are anti-aliased analytically)
 
     GLFWwindow* window = glfwCreateWindow(opt.width > 0 ? opt.width : kDefaultWidth, opt.height > 0 ? opt.height : kDefaultHeight,
                                           "AWL Cosmos", nullptr, nullptr);
@@ -1229,9 +1415,17 @@ int run(const Options& opt)
 
     App app(runOptions);
     app.window = window;
+    app.prefs = prefs;
+    app.prefsPath = prefsPath;
+    app.vsyncLocked = !opt.vsync;
+    app.uiScaleLocked = opt.uiScale > 0.0f;
+    app.threadsLocked = opt.threadsGiven;
+    app.warpLocked = opt.warpGiven;
+    app.launchMsaa = prefs.msaa;
+    app.defaultWarp = opt.warpGiven ? opt.warp : prefs.defaultWarp;
     app.threads = so.threads;
     app.infiniteFuel = scene.settings.infiniteFuel;
-    app.controllerTick = scene.settings.controllerTick_s;
+    app.controllerTick = sceneTick(app, scene.settings);
     {
         const std::string sceneName = scene.name;
         if (!app.rc.loadScene(std::move(scene), err)) {   // resolves the scene and builds the first driver
@@ -1265,7 +1459,10 @@ int run(const Options& opt)
     }
     glfwSetWindowUserPointer(window, &app);
     glfwMakeContextCurrent(window);   // before gladLoadGLLoader
-    glfwSwapInterval(opt.vsync ? 1 : 0);
+    glfwSwapInterval(vsync ? 1 : 0);
+#ifdef _WIN32
+    timeBeginPeriod(1);   // the frame-rate cap sleeps in 1 ms steps
+#endif
     glfwGetFramebufferSize(window, &app.fbW, &app.fbH);
     glfwGetWindowSize(window, &app.winW, &app.winH);
     app.cursorX = 0.5 * app.winW;
@@ -1292,7 +1489,7 @@ int run(const Options& opt)
         }
         renderer->resize(app.fbW, app.fbH);
 
-        app.rc.driver().warp().set(opt.warp);
+        app.rc.driver().warp().set(app.defaultWarp);
         app.seenGeneration = app.rc.generation();
         applyPrefs(app);
         buildSources(app);
@@ -1320,7 +1517,23 @@ int run(const Options& opt)
         if (!opt.follow.empty()) followByName(app, opt.follow, true);
         if (opt.mpp > 0.0) app.camera.setMetresPerPixel(opt.mpp);
         app.camera.update(app.state().t, app.src);
-        applyOverlayFlag(app.bar.overlays, opt.overlays);
+        if (!opt.overlays.empty()) {   // --overlays wins over the saved choice (scripted runs)
+            applyOverlayFlag(app.bar.overlays, opt.overlays);
+        } else {
+            const StartupOverlays& so0 = prefs.overlays;
+            ui::ViewOverlays& v = app.bar.overlays;
+            app.bar.showLabels = so0.names;
+            v.velocityArrows = so0.velocityArrows;
+            v.accelerationArrows = so0.accelerationArrows;
+            v.trails = so0.trails;
+            v.osculatingOrbits = so0.osculatingOrbits;
+            v.predictedPath = so0.predictedPath;
+            v.gravityRings = so0.gravityRings;
+            v.hill = so0.hill;
+            v.soi = so0.soi;
+            v.roche = so0.roche;
+            v.atmospheres = so0.atmospheres;
+        }
         app.workers.resize(so.threads);
         app.overlays.setThreadPool(&app.workers);
         app.overlays.setShuttlePalette(&app.palette);
@@ -1336,7 +1549,7 @@ int run(const Options& opt)
         AppHost host(app);
         if (opt.ui) {
             ui::UiConfig uc;
-            uc.scaleOverride = opt.uiScale;
+            uc.scaleOverride = opt.uiScale > 0.0f ? opt.uiScale : prefs.uiScale;
             if (!app.ui.init(window, uc)) std::cerr << "UI initialisation failed: running without the UI\n";
             const struct { const char* name; bool* flag; } windows[] = {
                 {"view", &app.bar.toolbar.view}, {"sim", &app.bar.toolbar.sim}, {"stats", &app.bar.toolbar.stats},
@@ -1345,6 +1558,14 @@ int run(const Options& opt)
                 if (opt.open.find(w.name) != std::string::npos) *w.flag = true;
             if (opt.open.find("nolabels") != std::string::npos) app.bar.showLabels = false;
         }
+        applyPrefsChanges(app, true);
+        if (startScreen && app.ui.initialised()) app.menu.showStart();
+        ui::SettingsPanelInfo settingsInfo;
+        settingsInfo.launchMsaa = app.launchMsaa;
+        settingsInfo.uiScaleLocked = app.uiScaleLocked;
+        settingsInfo.vsyncLocked = app.vsyncLocked;
+        settingsInfo.hardwareThreads = hardwareThreads();
+        settingsInfo.settingsFile = app.prefsPath.c_str();
         std::vector<ui::LabelItem> labelItems;
         int labelsDrawn = 0;
         double lastStatSample = -1.0, lastWall = glfwGetTime();
@@ -1468,20 +1689,28 @@ int run(const Options& opt)
 
             const double tBook = glfwGetTime();
             double tFill = tBook, tOverlays = tBook, tExplosions = tBook, tRenderFill = tBook, tRenderDraw = tBook, tUi = tBook;
+            const bool sceneHidden = app.menu.mode() == ui::MenuMode::Start;
             if (app.fbW > 0 && app.fbH > 0) {
                 frame.time = opt.fixedDt > 0.0 ? static_cast<double>(rs.frames) * opt.fixedDt : frameStart;   // repeatable flicker with --fixed-dt
-                fillFrame(app, frame);
-                tFill = glfwGetTime();
-                fillOverlays(app, frame);
-                tOverlays = glfwGetTime();
-                app.explosions.update(app.state(), fi.simDelta, fi.frameDt,
-                                      [&app](const Vec3& w, float& x, float& y) {
-                                          const Camera::Rel r = app.camera.toCameraRelative(w);
-                                          x = r.x;
-                                          y = r.y;
-                                      },
-                                      frame.explosions);
-                tExplosions = glfwGetTime();
+                if (sceneHidden) {   // behind the start screen: the starless background only
+                    frame.clearObjects();
+                    frame.viewportWidth = app.fbW;
+                    frame.viewportHeight = app.fbH;
+                    tFill = tOverlays = tExplosions = glfwGetTime();
+                } else {
+                    fillFrame(app, frame);
+                    tFill = glfwGetTime();
+                    fillOverlays(app, frame);
+                    tOverlays = glfwGetTime();
+                    app.explosions.update(app.state(), fi.simDelta, fi.frameDt,
+                                          [&app](const Vec3& w, float& x, float& y) {
+                                              const Camera::Rel r = app.camera.toCameraRelative(w);
+                                              x = r.x;
+                                              y = r.y;
+                                          },
+                                          frame.explosions);
+                    tExplosions = glfwGetTime();
+                }
                 renderer->gpuFrameBegin();
                 renderer->beginFrame(frame);
                 tRenderFill = glfwGetTime();
@@ -1506,14 +1735,27 @@ int run(const Options& opt)
                     lastWall = frameStart;
                     app.ui.newFrame();
                     const ImVec2 display = ImGui::GetIO().DisplaySize;
-                    app.bar.draw(host, display, app.ui.fontMedium());
-                    app.panel.draw(app.bar.toolbar, display, app.bar.height());
-                    app.labelOptions.show = app.bar.showLabels;
-                    app.labelOptions.keepOut = app.bar.occupied();
-                    app.labelOptions.keepOut.insert(app.labelOptions.keepOut.end(), app.panel.occupied().begin(), app.panel.occupied().end());
-                    buildLabels(app, frame, labelItems);
-                    labelsDrawn = ui::drawLabels(labelItems, app.labelOptions, app.ui.dpiScale());
+                    if (!sceneHidden) {   // the editor and the bar are not drawn behind the start screen
+                        app.bar.draw(host, display, app.ui.fontMedium());
+                        app.panel.draw(app.bar.toolbar, display, app.bar.height());
+                    }
+                    if (!app.menu.active()) {   // the labels are drawn above every window: not over a menu
+                        app.labelOptions.show = app.bar.showLabels;
+                        app.labelOptions.keepOut = app.bar.occupied();
+                        app.labelOptions.keepOut.insert(app.labelOptions.keepOut.end(), app.panel.occupied().begin(), app.panel.occupied().end());
+                        buildLabels(app, frame, labelItems);
+                        labelsDrawn = ui::drawLabels(labelItems, app.labelOptions, app.ui.dpiScale());
+                    }
+                    const ui::MenuRequest menuRequest = app.menu.draw(display, app.ui.fontMedium(), app.settingsPanel.isOpen());
+                    if (app.settingsPanel.draw(app.prefs, display, settingsInfo, app.ui.fontMedium())) app.prefsChanged = app.prefsDirty = true;
                     app.ui.render();
+                    // What the menus chose is carried out after the frame was drawn (a scene change replaces the simulation)
+                    handleMenuRequest(app, menuRequest);
+                    if (app.prefsChanged) {
+                        app.prefsChanged = false;
+                        applyPrefsChanges(app, false);
+                    }
+                    if (app.prefsDirty && !ImGui::IsAnyItemActive() && !ImGui::IsMouseDown(0)) savePrefsNow(app);
                 }
                 tUi = glfwGetTime();
                 renderer->gpuFrameEnd();
@@ -1581,6 +1823,16 @@ int run(const Options& opt)
                 auto& pp = perf.phase[static_cast<std::size_t>(Phase::Poll)];
                 if (!pp.empty() && pp.size() == perf.frame.size()) pp.back() = (glfwGetTime() - tPollStart) * 1000.0;
             } else glfwWaitEventsTimeout(0.1);   // minimised: nothing is drawn or swapped, so block instead of spinning a core
+
+            // Frame-rate cap (Settings > Graphics): wait out the rest of the frame's time slice, sleeping while there is time to
+            // spare and yielding for the last stretch. Not for the fixed-step and paced benchmark runs.
+            if (app.fpsCapActive > 0 && opt.fixedDt <= 0.0 && opt.benchPaceFps <= 0.0) {
+                const double target = frameStart + 1.0 / static_cast<double>(app.fpsCapActive);
+                for (double left = target - glfwGetTime(); left > 0.0; left = target - glfwGetTime()) {
+                    if (left > 0.003) sleepOneMs();
+                    else std::this_thread::yield();
+                }
+            }
         }
 
         if (rs.frames > 1) {
@@ -1595,7 +1847,7 @@ int run(const Options& opt)
             std::string label = opt.benchLabel.empty() ? std::string("run") : opt.benchLabel;
             label += " [" + std::to_string(app.fbW) + "x" + std::to_string(app.fbH) + ", warp " + formatSig(opt.warp, 3) + ", " +
                      std::to_string(app.rc.driver().sim().shuttles().aliveCount()) + " shuttles alive, " + std::to_string(so.threads) +
-                     " threads, vsync " + (opt.vsync ? "on" : "off") + ", warm-up " + std::to_string(opt.benchWarmup) + "]";
+                     " threads, vsync " + (vsync ? "on" : "off") + ", warm-up " + std::to_string(opt.benchWarmup) + "]";
             std::cout << perfReport(perf, label);
             const SimulationStats& ss = app.rc.driver().sim().stats();
             std::cout << "  simulation totals: body steps " << ss.bodySteps << ", shuttle steps " << ss.shuttleSteps << " (rejected "
@@ -1624,11 +1876,15 @@ int run(const Options& opt)
         std::cout << "Totals: frames " << tot.frames << ", GL errors " << tot.glErrors << ", GL warnings " << tot.glWarnings
                   << ", fence stalls " << tot.fenceStalls << ", buffer growths " << tot.arenaGrowths << "\n";
         if (tot.glErrors > 0) exitCode = 1;
+        if (app.prefsDirty) savePrefsNow(app);
         app.ui.shutdown();   // while the context is current and the window alive (ImGui restores the GLFW callbacks)
         renderer->shutdown();
     }   // renderer destroyed while the context is still current
 
     glfwDestroyWindow(window);
+#ifdef _WIN32
+    timeEndPeriod(1);
+#endif
     return exitCode;
 }
 

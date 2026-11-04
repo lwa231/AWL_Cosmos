@@ -38,6 +38,9 @@ public:
     void render();     // ImGui::Render() + draw into the bound framebuffer
 
     float dpiScale() const { return dpiScale_; }
+    // Changes the UI scale while running (Settings > Graphics): 0 = the window's own content scale. Call between frames, before
+    // newFrame(). Re-applies the theme at the new scale; the fonts scale with it (ImGui draws them at any size).
+    void setScale(float scale);
     bool fontsLoaded() const { return fontsLoaded_; }   // false: ImGui's built-in font is used and icons show as '?'
     ImFont* fontMedium() const { return fontMedium_; }  // Roboto Medium + icons, for emphasis
 
@@ -52,6 +55,7 @@ public:
 private:
     bool loadFonts(const UiConfig& config);
 
+    GLFWwindow* window_ = nullptr;
     bool initialised_ = false;
     bool backendGlfw_ = false;
     bool backendGl_ = false;

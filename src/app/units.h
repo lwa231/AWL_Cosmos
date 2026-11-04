@@ -53,7 +53,8 @@ ParseResult parseQuantity(std::string_view text, Quantity q, const char* default
 
 // "6371 km", "5.97 M_earth", "14.9 d": value (canonical unit) as text with `sig` significant digits (trailing zeros
 // removed, so it is a string to edit, not a column to align). forceUnit picks the unit (a unit name of the quantity; an
-// unknown name falls back to the automatic choice); nullptr chooses a sensible unit from the magnitude. parseQuantity
+// unknown name falls back to the automatic choice); nullptr chooses a sensible unit from the magnitude, or the
+// unit of displayPrefs() (display_prefs.h) for a Length or BodyMass. parseQuantity
 // of the result returns the value to within 10^-(sig-1) relative.
 std::string formatQuantity(double value, Quantity q, const char* forceUnit = nullptr, int sig = 6);
 

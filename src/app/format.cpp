@@ -1,4 +1,5 @@
 #include "app/format.h"
+#include "app/display_prefs.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -83,7 +84,9 @@ std::string formatTimeRate(double rate)
     return withUnit(rate, u, "/sec", 3);
 }
 
-std::string formatSimDate(double t)
+std::string formatSimDate(double t) { return formatSimDate(t, displayPrefs().date); }
+
+std::string formatSimDate(double t, DateFormat format)
 {
     if (!std::isfinite(t)) return "Day --";
     double a = std::fabs(t);
@@ -92,9 +95,21 @@ std::string formatSimDate(double t)
     const bool neg = t < 0.0 && total > 0;
     const long long day = total / 86400;
     const int secOfDay = static_cast<int>(total % 86400);
-    char buf[64];
-    std::snprintf(buf, sizeof buf, "%sDay %lld  %02d:%02d:%02d", neg ? "-" : "", day, secOfDay / 3600, (secOfDay / 60) % 60,
-                  secOfDay % 60);
+    const char* sign = neg ? "-" : "";
+    char buf[96];
+    switch (format) {
+    case DateFormat::DayOnly:
+        std::snprintf(buf, sizeof buf, "%sDay %lld", sign, day);
+        break;
+    case DateFormat::YearDay:
+        std::snprintf(buf, sizeof buf, "%sYear %lld, Day %lld  %02d:%02d:%02d", sign, day / 365, day % 365, secOfDay / 3600,
+                      (secOfDay / 60) % 60, secOfDay % 60);
+        break;
+    case DateFormat::DayClock:
+    default:
+        std::snprintf(buf, sizeof buf, "%sDay %lld  %02d:%02d:%02d", sign, day, secOfDay / 3600, (secOfDay / 60) % 60, secOfDay % 60);
+        break;
+    }
     return buf;
 }
 
@@ -103,6 +118,12 @@ std::string formatDistance(double m)
     if (!std::isfinite(m)) return formatSig(m, 3) + " m";
     static const Unit units[] = {{"m", 1.0, 0.0}, {"km", 1.0e3, 1.0e3}, {"Mm", 1.0e6, 1.0e6}, {"Gm", 1.0e9, 1.0e9},
                                  {"AU", kAU, 1.0e11}};
+    switch (displayPrefs().length) {   // a fixed unit from the settings
+    case LengthUnit::Metres: return withUnit(m, units[0], "", 3);
+    case LengthUnit::Kilometres: return withUnit(m, units[1], "", 3);
+    case LengthUnit::AU: return withUnit(m, units[4], "", 3);
+    case LengthUnit::Auto: break;
+    }
     return withUnit(m, pickUnit(units, std::fabs(m), 3), "", 3);
 }
 

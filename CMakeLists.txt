@@ -135,6 +135,9 @@ add_custom_target(copy_fonts ALL DEPENDS ${FONT_OUTPUTS})
 add_dependencies(AWL_Cosmos copy_fonts)
 
 target_link_libraries(AWL_Cosmos PRIVATE cosmos_app cosmos_core imgui glad glfw OpenGL::GL)
+if(WIN32)
+    target_link_libraries(AWL_Cosmos PRIVATE winmm)   # timeBeginPeriod for the frame-rate cap
+endif()
 
 # Build and run from the exe's folder so shaders/ resolves:  cmake --build build --target run
 add_custom_target(run
