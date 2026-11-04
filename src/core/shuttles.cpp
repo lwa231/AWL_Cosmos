@@ -573,6 +573,7 @@ void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const Sh
             events.push_back(makeFuelEmpty(z.emptyAt, id));
             z.reported = true;
         }
+        const double theta1 = z.theta;   // unwrapped: continuous with y.theta (for the interpolation, plan 6.6)
         z.theta = wrapHeading(z.theta);
 
         ShuttleStepInfo info;
@@ -584,6 +585,10 @@ void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const Sh
         info.v0 = y.v;
         info.r1 = z.r;
         info.v1 = z.v;
+        info.heading0 = y.theta;
+        info.spin0 = y.omega;
+        info.heading1 = theta1;
+        info.spin1 = z.omega;
 
         y = z;
         y.emptyAt = std::numeric_limits<double>::quiet_NaN();

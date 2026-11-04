@@ -84,6 +84,23 @@ endforeach()
 add_custom_target(copy_shaders ALL DEPENDS ${SHADER_OUTPUTS})
 add_dependencies(AWL_Cosmos copy_shaders)
 
+# Scenes next to the exe too (the app loads scenes/lucerna.json from its working folder, like shaders/)
+file(GLOB SCENE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/scenes/*.json)
+set(SCENE_OUTPUTS "")
+foreach(scene ${SCENE_SOURCES})
+    get_filename_component(scene_name ${scene} NAME)
+    set(scene_out ${CMAKE_BINARY_DIR}/scenes/${scene_name})
+    add_custom_command(
+        OUTPUT ${scene_out}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${scene} ${scene_out}
+        DEPENDS ${scene}
+        COMMENT "Copying scene ${scene_name}"
+    )
+    list(APPEND SCENE_OUTPUTS ${scene_out})
+endforeach()
+add_custom_target(copy_scenes ALL DEPENDS ${SCENE_OUTPUTS})
+add_dependencies(AWL_Cosmos copy_scenes)
+
 target_link_libraries(AWL_Cosmos PRIVATE cosmos_app cosmos_core glad glfw OpenGL::GL)
 
 # Build and run from the exe's folder so shaders/ resolves:  cmake --build build --target run

@@ -252,6 +252,10 @@ struct ShuttleStepInfo {
     double t0 = 0.0;
     double t1 = 0.0;
     Vec3 r0, v0, r1, v1;
+    // Heading and spin at t0 and t1. heading1 is heading0 plus the rotation of the step (not wrapped to [-pi, pi]), so
+    // the pair is continuous; the torque is constant inside a step (steps end at controller ticks), hence the heading is
+    // exactly quadratic in time between the two and a cubic Hermite of (heading, spin) reproduces it (plan 6.6).
+    double heading0 = 0.0, spin0 = 0.0, heading1 = 0.0, spin1 = 0.0;
 };
 
 // Hook for the collision logic (another module): called after every accepted step, in time order, on the thread that

@@ -37,6 +37,26 @@ Vec3 hermiteVelocity(const ShuttleSample& a, const ShuttleSample& b, double t)
     return a.r * d00 + a.v * d10 + b.r * d01 + b.v * d11;
 }
 
+double hermiteHeading(const ShuttleSample& a, const ShuttleSample& b, double t)
+{
+    const double h = b.t - a.t;
+    if (!(h > 0.0)) return a.heading;
+    const double s = std::clamp((t - a.t) / h, 0.0, 1.0);
+    const double s2 = s * s, s3 = s2 * s;
+    return a.heading * (2.0 * s3 - 3.0 * s2 + 1.0) + a.spin * (h * (s3 - 2.0 * s2 + s)) +
+           b.heading * (-2.0 * s3 + 3.0 * s2) + b.spin * (h * (s3 - s2));
+}
+
+double hermiteSpin(const ShuttleSample& a, const ShuttleSample& b, double t)
+{
+    const double h = b.t - a.t;
+    if (!(h > 0.0)) return a.spin;
+    const double s = std::clamp((t - a.t) / h, 0.0, 1.0);
+    const double s2 = s * s;
+    return a.heading * ((6.0 * s2 - 6.0 * s) / h) + a.spin * (3.0 * s2 - 4.0 * s + 1.0) +
+           b.heading * ((-6.0 * s2 + 6.0 * s) / h) + b.spin * (3.0 * s2 - 2.0 * s);
+}
+
 namespace {
 
 constexpr std::size_t kNpos = static_cast<std::size_t>(-1);
@@ -245,8 +265,8 @@ public:
         }
         if (!hits.empty()) appendShuttleStepEvents(events, s.t0, s.id, hits);
 
-        ShuttleSample from{s.t0, s.r0, s.v0};
-        ShuttleSample to{s.t1, s.r1, s.v1};
+        ShuttleSample from{s.t0, s.r0, s.v0, s.heading0, s.spin0};
+        ShuttleSample to{s.t1, s.r1, s.v1, s.heading1, s.spin1};
         if (killer) {
             // Destroyed at the contact point: the chord position and the velocity interpolated the same way.
             const double tc = *killer->contact.surface;
@@ -255,10 +275,18 @@ public:
             killT = s.t0 + tc;
             killPoint = killer->contact.surfacePoint;
             killVelocity = s.v0 + (s.v1 - s.v0) * f;
-            to = {killT, killPoint, killVelocity};
+            to = {killT, killPoint, killVelocity, s.heading0 + (s.heading1 - s.heading0) * f,
+                  s.spin0 + (s.spin1 - s.spin0) * f};
         }
         lastStep_[s.index] = {from, to};
-        if (record_) paths_[s.index].push_back(to);
+        if (record_) {
+            // The step's own headings are relative to its start (wrapped there); chain them onto the previous sample so
+            // the whole path is continuous.
+            std::vector<ShuttleSample>& path = paths_[s.index];
+            ShuttleSample p = to;
+            if (!path.empty()) p.heading = path.back().heading + (to.heading - from.heading);
+            path.push_back(p);
+        }
         return killer == nullptr;
     }
 
@@ -348,7 +376,8 @@ void Simulation::resizeShuttleArrays()
     paths_.resize(shuttles_.size());
     for (std::size_t i = old; i < shuttles_.size(); ++i) {
         const ShuttleSample s{t_, {shuttles_.state.x[i], shuttles_.state.y[i], shuttles_.state.z[i]},
-                              {shuttles_.state.vx[i], shuttles_.state.vy[i], shuttles_.state.vz[i]}};
+                              {shuttles_.state.vx[i], shuttles_.state.vy[i], shuttles_.state.vz[i]}, shuttles_.heading[i],
+                              shuttles_.spin[i]};
         lastStep_[i] = {s, s};
     }
 }
@@ -530,7 +559,8 @@ void Simulation::advanceShuttles(double t0, double t1)
             paths_[i].clear();
             if (shuttles_.alive[i] != 0)
                 paths_[i].push_back({t0, {shuttles_.state.x[i], shuttles_.state.y[i], shuttles_.state.z[i]},
-                                     {shuttles_.state.vx[i], shuttles_.state.vy[i], shuttles_.state.vz[i]}});
+                                     {shuttles_.state.vx[i], shuttles_.state.vy[i], shuttles_.state.vz[i]},
+                                     shuttles_.heading[i], shuttles_.spin[i]});
         }
     }
     if (n == 0 || shuttles_.aliveCount() == 0) return;
@@ -646,6 +676,26 @@ Vec3 Simulation::shuttleVelocityAt(std::size_t i, double t) const
         return hermiteVelocity(*a, *b, t);
     }
     return hermiteVelocity(lastStep_[i].from, lastStep_[i].to, t);
+}
+
+double Simulation::shuttleHeadingAt(std::size_t i, double t) const
+{
+    if (recordPaths_ && !paths_[i].empty()) {
+        const ShuttleSample *a, *b;
+        bracket(paths_[i], t, a, b);
+        return hermiteHeading(*a, *b, t);
+    }
+    return hermiteHeading(lastStep_[i].from, lastStep_[i].to, t);
+}
+
+double Simulation::shuttleSpinAt(std::size_t i, double t) const
+{
+    if (recordPaths_ && !paths_[i].empty()) {
+        const ShuttleSample *a, *b;
+        bracket(paths_[i], t, a, b);
+        return hermiteSpin(*a, *b, t);
+    }
+    return hermiteSpin(lastStep_[i].from, lastStep_[i].to, t);
 }
 
 } // namespace cosmos
