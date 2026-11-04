@@ -122,23 +122,31 @@ Hierarchy buildHierarchy(const std::vector<Vec3>& r, const std::vector<Vec3>& v,
     return h;
 }
 
+bool betterParent(const ParentCandidate& a, const ParentCandidate& b)
+{
+    if (a.hill != b.hill) return a.hill < b.hill;
+    if (a.leaf != b.leaf) return a.leaf;
+    if (a.depth != b.depth) return a.depth > b.depth;
+    return a.dist < b.dist;
+}
+
 int shuttleParent(const Hierarchy& h, const Vec3& position)
 {
     int best = h.root;
-    int bestDepth = 0;
-    double bestDist = std::numeric_limits<double>::infinity();
     if (best == -1) return -1;
+    ParentCandidate bestC;
+    bool have = false;
 
     for (int i = 0; i < static_cast<int>(h.nodes.size()); ++i) {
         if (i == h.root) continue;
         const double d = norm(position - h.nodes[i].r);
         const double rh = hillRadius(h, i);
         if (!std::isfinite(rh) || d >= rh) continue;
-        const int depth = depthOf(h, i);
-        if (depth > bestDepth || (depth == bestDepth && d < bestDist)) {
+        const ParentCandidate c{rh, h.nodes[i].childA < 0, depthOf(h, i), d};
+        if (!have || betterParent(c, bestC)) {
             best = i;
-            bestDepth = depth;
-            bestDist = d;
+            bestC = c;
+            have = true;
         }
     }
     return best;

@@ -101,10 +101,20 @@ public:
 
 // Points along (sign = +1) or against (sign = -1) the velocity relative to the parent and burns at full throttle once
 // aligned. With no relative motion it holds its heading.
+//
+// Cost (plan 6.4, 17): the command depends on the state, so while the engine can run every tick is a controller call and a
+// step boundary (10 shuttle steps per sim second at the default tick), 1e6 steps per real second at 1e5x warp. That is the
+// price of a state-dependent autopilot; the tick period (settings.controllerTick_s) is the knob. A shuttle that cannot
+// thrust at all (finite fuel, tank empty) has nothing to point at: it damps its spin once, then asks for no more ticks, so
+// the tail of a burn-out costs the same as a Coast shuttle. Infinite fuel keeps the full rate.
 class BurnController : public IController {
 public:
     explicit BurnController(double sign) : sign_(sign) {}
     ShuttleCommand update(const ShuttleObservation& obs, Rng& rng) override;
+    std::int64_t nextTick(const ShuttleObservation& obs) const override;
+
+    // A spin below this (rad/s) of a shuttle that cannot thrust is left alone.
+    static constexpr double kRestSpin = 1e-9;
 
 private:
     double sign_;

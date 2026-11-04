@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <optional>
 #include <vector>
+#include "core/atmosphere.h"
 #include "core/bodies.h"
 #include "core/events.h"
 #include "core/vec3.h"
@@ -15,8 +16,8 @@ namespace cosmos {
 // ---------------------------------------------------------------------------------------------------------------
 // Trigger radius (plan 5.5, 5.10)
 
-// Atmosphere cutoff density (kg/m^3): the top of the atmosphere is where rho falls to this value.
-inline constexpr double kAtmosphereCutoffDensity = 1e-6;
+// Atmosphere cutoff density (kg/m^3): the top of the atmosphere is where rho falls to this value. Defined once, in
+// atmosphere.h (this header used to repeat the definition, which broke any file that included both).
 
 // top = H ln(rho0 / 1e-6). 0 without an atmosphere, and 0 when rho0 <= 1e-6 (the air never gets that thin to matter).
 double triggerAtmosphereTop(const std::optional<Atmosphere>& atmosphere);
