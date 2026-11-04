@@ -80,3 +80,16 @@ The function signatures are agreed first, so both sides can work in parallel.
 - Release build with the full doctest suite green, determinism included.
 - `--shot` screenshots of the new UI.
 - The 6.9 ms benchmark at 1× and 100,000×.
+
+## Status (handoff)
+- **Step 1, menus and settings: done** (commit "V1.1 step 1", 667 tests passing in Release, 0 GL errors).
+  - Start screen shows without `--scene`; `--menu` forces it.
+  - Esc: the first press stops following, the second opens the pause menu.
+  - Settings has five tabs; Controls and Credits text lives in `src/ui/info_text.cpp`.
+  - `settings.json` is written next to the exe and is gitignored.
+- **Loose ends from step 1:**
+  - The "Load scene file…" popup has not been checked with a screenshot.
+  - Return to menu and Quit don't warn about unsaved edits.
+  - The 6.9 ms benchmark was only spot-checked (about 0.65 ms avg at 1×), not formally re-run.
+- **Next: step 2**, warp snapping and the object table.
+- **Environment:** building and testing the GUI needs Windows with MSYS2 UCRT64 and an OpenGL 4.5 GPU. A Linux cloud session can edit code and run the GL-free `cosmos_tests`, but the exe's screenshots need the Windows machine.
