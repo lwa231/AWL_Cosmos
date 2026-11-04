@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include "app/explosion_frame.h"
 
 namespace cosmos {
 namespace app {
@@ -108,6 +109,7 @@ struct RenderFrame {
     std::vector<RenderShuttle> shuttles;
     LineBatch underlay;         // drawn before bodies (trails, orbits, Hill/SOI circles; plan 9.4 steps 4-5)
     LineBatch overlay;          // drawn after shuttles (velocity/acceleration arrows; plan 9.4 step 9)
+    ExplosionFrame explosions;  // fragments and sparks (plan 9.4 step 8, 9.7); filled by ExplosionSystem::update, drawn by Renderer::drawExplosions
 
     // Empties every array but keeps the capacity, so the per-frame fill does not reallocate.
     void clearObjects()
@@ -117,6 +119,7 @@ struct RenderFrame {
         shuttles.clear();
         underlay.clear();
         overlay.clear();
+        explosions.clear();
     }
 };
 

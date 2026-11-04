@@ -21,11 +21,13 @@
 #include <vector>
 #include "app/bmp_writer.h"
 #include "app/camera.h"
+#include "app/explosions.h"
 #include "app/format.h"
 #include "app/palette.h"
 #include "app/presets.h"
 #include "app/render_frame.h"
 #include "app/run_control.h"
+#include "app/slow_down.h"
 #include "app/sim_driver.h"
 #include "app/units.h"
 #include "core/kinds.h"
@@ -74,6 +76,8 @@ struct Options {
     struct Click { int frame = 0; double x = 0.0, y = 0.0; };   // --click X,Y@FRAME: cursor moves at FRAME, presses at +1, releases at +2
     std::vector<Click> clicks;
     int slowDownAt = -1;              // --slow-down-at N: trigger one automatic slow-down level at frame N (shows "Resume warp")
+    std::string explode;              // --explode BODY@FRAME (developer aid, M7): a test explosion on BODY's surface at the camera centre
+    int explodeAt = -1;
     std::string screenshotPrev;       // --screenshot-prev path.bmp: also write the frame before the last (needs --frames >= 2)
     // --do COMMAND@FRAME: scripted editor and run commands for verification (see runCommand): new:empty, add:star,
     // select:NAME, set:Mass=1 M_sun, orbit:PARENT,DISTANCE, start, pause, stop, save:PATH, load:PATH, delete, report, ...
@@ -134,6 +138,12 @@ bool parseArgs(int argc, char** argv, Options& o)
             o.clicks.push_back(c);
         }
         else if (a == "--slow-down-at" && i + 1 < argc) o.slowDownAt = std::atoi(argv[++i]);
+        else if (a == "--explode" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            const std::size_t at = v.rfind('@');
+            o.explode = v.substr(0, at);
+            o.explodeAt = at == std::string::npos ? 1 : std::atoi(v.c_str() + at + 1);
+        }
         else if (a == "--do" && i + 1 < argc) {
             const std::string v = argv[++i];
             const std::size_t at = v.rfind('@');
@@ -209,6 +219,8 @@ struct App {
     ui::BottomBar bar;               // bottom bar, its windows, the event log and the stats history
     ui::LeftPanel panel;             // the scene editor (list, fields, scene menu, add palette)
     ui::LabelOptions labelOptions;
+    SlowDown slowDown;               // warp step-down for approaching impacts (M7, plan 8)
+    ExplosionSystem explosions;      // explosion registry; fills RenderFrame::explosions (M7, plan 9.7)
     double lastStatSimTime = -1.0e300;   // physics time of the last conservation sample
 
     int winW = 0, winH = 0;          // window size in screen coordinates (cursor units)
@@ -497,6 +509,7 @@ void syncGeneration(App& app)
     for (const Event& e : cutOff) logEvent(app, e);
     app.names.clear();
     app.survivorOf.clear();
+    app.explosions.clear();   // the old simulation's events and bodies are gone
     for (const Event& e : cutOff)
         if (e.type == EventType::Merge) app.survivorOf[e.other] = e.id;
     applyPrefs(app);
@@ -730,6 +743,36 @@ void fillFrame(const App& app, RenderFrame& frame)
     }
 }
 
+// Developer aid for --explode BODY@FRAME: a shuttle-sized explosion on the surface of BODY, under the camera centre (the camera
+// is moved onto the contact point, still following the body), so the effect can be checked without waiting for a crash.
+void devExplode(App& app, const std::string& bodyName)
+{
+    const std::string want = lower(bodyName);
+    for (const DisplayBody& b : app.state().bodies) {
+        if (lower(b.name) != want) continue;
+        Vec3 dir = app.camera.centreWorld() - b.r;
+        dir.z = 0.0;
+        const double n = norm(dir);
+        dir = n > 0.0 ? dir / n : Vec3{0.0, 1.0, 0.0};
+        ExplosionSpec spec;
+        spec.contact = b.r + dir * (b.radius + 1.0);
+        spec.refBody = b.id;
+        spec.refPos = b.r;
+        spec.refVel = b.v;
+        spec.refSpin = b.spinRate;
+        spec.normal = dir;
+        spec.impactVelocity = dir * -3000.0;
+        spec.impactorRadius = 2.0;
+        spec.sourceId = b.id;
+        spec.time = app.state().t;
+        app.explosions.spawn(spec);
+        app.camera.setCentreWorld(spec.contact);
+        std::cout << "Test explosion on " << b.name << "\n";
+        return;
+    }
+    std::cerr << "--explode: no body named '" << bodyName << "'\n";
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // UI glue (M6)
 
@@ -778,6 +821,8 @@ public:
     }
     bool infiniteFuel() const override { return app_.infiniteFuel; }
     void setInfiniteFuel(bool on) override { app_.infiniteFuel = on; applyPrefs(app_); }
+    bool slowDownAnyShuttle() const override { return app_.slowDown.options.anyShuttle; }
+    void setSlowDownAnyShuttle(bool on) override { app_.slowDown.options.anyShuttle = on; }
 
 private:
     App& app_;
@@ -976,6 +1021,7 @@ bool runCommand(App& app, const std::string& text)
     if (verb == "load") return app.panel.loadSceneFile(arg) || fail(app.panel.sceneMessage());
     if (verb == "save") return app.panel.saveCurrent(arg) || fail(app.panel.sceneMessage());
     if (verb == "start") { runStart(app); return app.rc.running() || fail("not running"); }
+    if (verb == "resumewarp") return app.rc.driver().warp().resume() || fail("nothing to resume");   // the Resume warp button (M7)
     if (verb == "pause") { runPause(app); return app.rc.state() == RunState::Paused || fail("not paused"); }
     if (verb == "stop") { runStop(app); return app.rc.state() == RunState::Stopped || fail("not stopped"); }
     if (verb == "report") { printReport(app); return true; }
@@ -1237,6 +1283,16 @@ int run(const Options& opt)
             }
             if (advanced)
                 for (const Event& e : app.rc.driver().dueEvents()) logEvent(app, e);
+            // M7: explosions for the events that became due, and the warp step-down (the integrator may move this block).
+            if (advanced) {
+                app.explosions.handleEvents(app.rc.driver().dueEvents(), app.state(), app.rc.driver().sim());
+                std::vector<std::uint64_t> watched;   // the followed shuttle and the selected object (an id that is not a shuttle is ignored)
+                if (app.camera.following().kind == TargetKind::Shuttle) watched.push_back(app.camera.following().id);
+                if (app.rc.editor().selected() != 0) watched.push_back(app.rc.editor().selected());
+                const SlowDownReport sd = app.slowDown.update(app.rc.driver(), watched);
+                if (sd.steppedDown) app.say("Slowing down for an approaching impact: " + formatTimeRate(sd.warpAfter));
+            }
+            if (opt.explodeAt > 0 && rs.frames + 1 == opt.explodeAt) devExplode(app, opt.explode);   // --explode (developer aid)
             titleSim += fi.simDelta;
             titleReal += fi.frameDt;
             rs.physicsSum += fi.physicsSeconds;
@@ -1260,10 +1316,18 @@ int run(const Options& opt)
             if (app.fbW > 0 && app.fbH > 0) {
                 frame.time = opt.fixedDt > 0.0 ? static_cast<double>(rs.frames) * opt.fixedDt : frameStart;   // repeatable flicker with --fixed-dt
                 fillFrame(app, frame);
+                app.explosions.update(app.state(), fi.simDelta, fi.frameDt,
+                                      [&app](const Vec3& w, float& x, float& y) {
+                                          const Camera::Rel r = app.camera.toCameraRelative(w);
+                                          x = r.x;
+                                          y = r.y;
+                                      },
+                                      frame.explosions);
                 renderer->beginFrame(frame);
                 renderer->drawLines(render::LinePass::Underlay);
                 renderer->drawBodies();
                 renderer->drawShuttles();
+                renderer->drawExplosions();
                 renderer->drawLines(render::LinePass::Overlay);
                 renderer->endFrame();
 
@@ -1326,7 +1390,7 @@ int run(const Options& opt)
         const render::RenderStats& st = renderer->frameStats();
         const render::RenderTotals& tot = renderer->totals();
         std::cout << "Last frame: draw calls " << st.drawCalls << " (bodies " << st.bodyInstances << ", shuttles " << st.shuttleInstances
-                  << ", line segments " << st.lineSegments << "), lights " << st.lightCount << ", streamed " << st.streamedBytes << " bytes\n";
+                  << ", line segments " << st.lineSegments << ", explosion draws " << st.explosionDrawCalls << " over " << st.explosionFragments << " fragments), lights " << st.lightCount << ", streamed " << st.streamedBytes << " bytes\n";
         std::cout << "UI: " << (app.ui.initialised() ? "on" : "off") << ", labels drawn in the last frame " << labelsDrawn
                   << ", UI scale " << app.ui.dpiScale() << (app.ui.fontsLoaded() ? "" : " (fonts missing)") << "\n";
         std::cout << "Totals: frames " << tot.frames << ", GL errors " << tot.glErrors << ", GL warnings " << tot.glWarnings

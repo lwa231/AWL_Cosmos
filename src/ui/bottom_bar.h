@@ -59,6 +59,10 @@ public:
     virtual bool controllerTickEditable() const { return runState() != RunState::Running; }   // only while not running
     virtual bool infiniteFuel() const { return false; }
     virtual void setInfiniteFuel(bool) {}
+    // "Slow down for any shuttle impact" (plan 8 item 4): without it only the followed or selected shuttle and the body pairs
+    // slow the warp down.
+    virtual bool slowDownAnyShuttle() const { return false; }
+    virtual void setSlowDownAnyShuttle(bool) {}
 };
 
 // A short history of one-line messages (events, notes). Messages are pushed by the app; the bar shows the latest and

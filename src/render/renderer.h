@@ -6,6 +6,7 @@
 //     renderer.drawLines(LinePass::Underlay);
 //     renderer.drawBodies();
 //     renderer.drawShuttles();
+//     renderer.drawExplosions();           // fragments and sparks, additive (plan 9.4 step 8)
 //     renderer.drawLines(LinePass::Overlay);
 //     renderer.endFrame();                 // puts a fence behind this frame's streamed data
 //     (the caller swaps buffers)
@@ -39,6 +40,8 @@ struct RenderStats {
     std::uint32_t lightCount = 0;
     std::uint32_t shuttleInstances = 0;
     std::uint32_t lineSegments = 0;        // quads drawn (strips + loose segments), both passes
+    std::uint32_t explosionDrawCalls = 0;  // fragment + spark draws (compute passes not counted)
+    std::uint32_t explosionFragments = 0;  // fragment pool slots processed this frame
     std::uint64_t streamedBytes = 0;       // bytes written into the persistent mapped buffer this frame
 };
 
@@ -65,6 +68,9 @@ public:
     virtual void drawBodies() = 0;                          // plan 9.4 step 6
     virtual void drawShuttles() = 0;                        // plan 9.4 step 7 (hulls + flames, one draw call)
     virtual void drawLines(LinePass pass) = 0;              // streamed line batch (underlay: step 4/5, overlay: step 9)
+    // Plan 9.4 step 8, after drawShuttles: integrates the explosion fragments (compute) and draws fragments + sparks additively.
+    // Reads frame.explosions; does nothing without a live explosion. Call once per frame.
+    virtual void drawExplosions() {}
     virtual void endFrame() = 0;
 
     virtual const RenderStats& frameStats() const = 0;

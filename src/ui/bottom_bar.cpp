@@ -288,6 +288,10 @@ void BottomBar::drawSimWindow(RunHost& host, ImVec2 display, float barTop)
         bool fuel = host.infiniteFuel();
         if (ImGui::Checkbox("Infinite fuel", &fuel)) host.setInfiniteFuel(fuel);
         tip("Shuttles never run out of fuel");
+
+        bool anyShuttle = host.slowDownAnyShuttle();
+        if (ImGui::Checkbox("Slow down for any shuttle impact", &anyShuttle)) host.setSlowDownAnyShuttle(anyShuttle);
+        tip("Off: the warp steps down only for the followed shuttle and for bodies about to collide.\nOn: for every shuttle about to hit a body or its air.");
         noteWindowRect();
     }
     ImGui::End();
