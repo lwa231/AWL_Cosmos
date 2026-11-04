@@ -109,7 +109,11 @@ bool RunControl::rebuild(const Scene& scene, const ResolveOptions& resolve, std:
     std::vector<std::string> warnings;
     std::unique_ptr<SimDriver> d = buildDriver(scene, resolve, options_.sim, options_.driver, error, &warnings);
     if (!d) return false;
-    if (driver_) d->warp() = driver_->warp();   // the warp setting (and its Resume memory) survives rebuilds
+    if (driver_) {
+        d->warp() = driver_->warp();   // the warp setting (and its Resume memory) survives rebuilds
+        d->sim().setInfiniteFuel(driver_->sim().infiniteFuel());   // so do the Simulation window's choices
+        d->sim().setControllerTick(driver_->sim().controllerTick());
+    }
     d->setPaused(true);
     driver_ = std::move(d);
     buildWarnings_ = std::move(warnings);
@@ -152,6 +156,7 @@ bool RunControl::loadScene(Scene scene, std::string& error)
     haveSnapshot_ = false;
     snapshot_ = Scene{};
     lastError_.clear();
+    flushedEvents_.clear();
     return true;
 }
 
@@ -160,10 +165,12 @@ EditResult RunControl::applyEdits()
     if (state_ == RunState::Running) return EditResult::failure(kLockedMessage);
     if (!dirty()) return EditResult::success();
     std::string error;
+    const std::vector<Event> cutOff = driver_->pendingEvents();   // the look-ahead the old simulation had computed
     if (!rebuild(editor_.scene(), editor_.resolveOptions(), error)) {
         lastError_ = error;
         return EditResult::failure(error);
     }
+    flushedEvents_.insert(flushedEvents_.end(), cutOff.begin(), cutOff.end());
     builtRevision_ = editor_.revision();
     lastError_.clear();
     EditResult r = EditResult::success();
@@ -176,11 +183,12 @@ EditResult RunControl::start()
     if (state_ == RunState::Running) return EditResult::success();
     lastError_.clear();
 
+    if (editor_.scene().bodies.empty()) {   // Stopped, or Paused with every body deleted: nothing to simulate
+        lastError_ = "Add at least one body before pressing Start.";
+        return EditResult::failure(lastError_);
+    }
     if (state_ == RunState::Stopped) {
-        if (editor_.scene().bodies.empty()) {
-            lastError_ = "Add at least one body before pressing Start.";
-            return EditResult::failure(lastError_);
-        }
+        flushedEvents_.clear();
         std::string error;
         if (!rebuild(editor_.scene(), editor_.resolveOptions(), error)) {
             lastError_ = error;
@@ -228,6 +236,7 @@ EditResult RunControl::stop()
     }
 
     const std::uint64_t top = highestId();
+    flushedEvents_.clear();
     std::string error;
     ResolveOptions autoResolve;
     autoResolve.recentre = Recentre::Auto;
@@ -262,6 +271,8 @@ bool RunControl::captureCurrent(Scene& out, const std::string& name)
 {
     if (state_ == RunState::Stopped) {
         out = editor_.scene();
+        out.settings.infiniteFuel = driver_->sim().infiniteFuel();   // the Simulation window's choices, as in a run
+        out.settings.controllerTick_s = driver_->sim().controllerTick();
         if (!name.empty()) out.name = name;
         return true;
     }

@@ -45,6 +45,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 #include "app/editor_model.h"
 #include "app/sim_driver.h"
@@ -115,6 +116,11 @@ public:
     // resolved (the old driver stays).
     EditResult applyEdits();
 
+    // The events a rebuild after an edit cut off: produced by the physics of the old simulation but not yet reached by the
+    // display (see the top comment). Oldest first; handing them over empties the list. Cleared by start (from Stopped), stop and
+    // loadScene.
+    std::vector<Event> takeFlushedEvents() { return std::move(flushedEvents_); }
+
     // ---- Frames -----------------------------------------------------------------------------------------------
     // One real frame: advances the driver while Running (and pauses with lastError() set if the integrator fails); otherwise
     // applies pending edits. Returns true when the simulation was advanced.
@@ -147,6 +153,7 @@ private:
     std::uint64_t builtRevision_ = 0;
     std::uint64_t generation_ = 0;
     std::string lastError_;
+    std::vector<Event> flushedEvents_;
 };
 
 } // namespace app

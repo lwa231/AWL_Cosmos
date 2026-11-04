@@ -58,12 +58,6 @@ bool inputString(const char* id, std::string& s, ImGuiInputTextFlags flags = 0)
     return r;
 }
 
-bool fileExists(const std::string& path)
-{
-    std::ifstream f(path, std::ios::binary);
-    return f.good();
-}
-
 std::string formatLive(double v, Quantity q) { return app::formatQuantity(v, q, nullptr, 4); }
 
 } // namespace
@@ -127,8 +121,17 @@ bool LeftPanel::loadSceneFile(const std::string& pathIn)
 
 bool LeftPanel::saveCurrent(const std::string& pathIn)
 {
-    const std::string path = app::withSceneExtension(pathIn.empty() ? scenePath : pathIn);
-    const bool existed = fileExists(path);
+    const std::string& base = pathIn.empty() ? scenePath : pathIn;
+    if (base.empty()) {
+        sceneMsg_ = "Cannot save: enter a file name";
+        sceneMsgError_ = true;
+        if (hooks.say) hooks.say(sceneMsg_);
+        return false;
+    }
+    const std::string wanted = app::withSceneExtension(base);
+    // Never overwrite: an existing file (an earlier save, a shipped preset) keeps its content and the new one gets a free
+    // name next to it (my_scene.json -> my_scene_2.json).
+    const std::string path = app::uniqueScenePath(wanted);
     std::string err;
     if (!rc_.saveCurrent(path, err)) {
         sceneMsg_ = "Cannot save " + path + ": " + err;
@@ -136,8 +139,10 @@ bool LeftPanel::saveCurrent(const std::string& pathIn)
         if (hooks.say) hooks.say(sceneMsg_);
         return false;
     }
-    sceneMsg_ = std::string(existed ? "Replaced " : "Saved ") + path;
+    sceneMsg_ = "Saved " + path;
+    if (path != wanted) sceneMsg_ += " (" + wanted + " already exists, it was not overwritten)";
     sceneMsgError_ = false;
+    if (pathIn.empty()) scenePath = path;   // Load then reads what was just saved
     if (hooks.say) hooks.say(sceneMsg_);
     return true;
 }
@@ -421,7 +426,7 @@ void LeftPanel::drawSelected()
     if (running) {
         wrapped(pal.warn, std::string(ICON_FA_LOCK "  ") + "Running: editing is off. Pause or Stop to edit; the values below are live.");
     } else if (rc_.state() == app::RunState::Paused) {
-        dim("Paused: an edit rebuilds the simulation from this moment.");
+        wrapped(pal.textDim, "Paused: an edit rebuilds the simulation from this moment.");
     }
     if (!actionError_.empty()) wrapped(pal.danger, actionError_);
     drawWarnings(id);
@@ -525,6 +530,7 @@ void LeftPanel::field(std::uint64_t id, Field f, bool enabled, const char* label
     ImGui::BeginDisabled(!enabled);
     const bool enter = ImGui::InputText("##v", buf, sizeof(buf), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
     const bool left = ImGui::IsItemDeactivatedAfterEdit();
+    const bool escaped = ImGui::IsItemDeactivated() && ImGui::IsKeyPressed(ImGuiKey_Escape, false);
     const bool active = ImGui::IsItemActive();
     ImGui::EndDisabled();
     if (bad) {
@@ -542,7 +548,11 @@ void LeftPanel::field(std::uint64_t id, Field f, bool enabled, const char* label
         st.editing = true;
         st.error.clear();
     }
-    if (enabled && (enter || left)) {
+    if (escaped) {   // Esc gives up the edit: the field shows the model's value again, a stale error goes away
+        st.editing = false;
+        st.error.clear();
+        st.text = ed.fieldText(id, f);
+    } else if (enabled && (enter || left)) {
         const EditResult r = applyText(id, f, st.text);
         if (r.ok) {
             st.editing = false;

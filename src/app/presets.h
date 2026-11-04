@@ -42,6 +42,10 @@ bool loadPreset(const std::string& id, const std::string& sceneDir, Scene& out, 
 // ---- user scene files ----------------------------------------------------------------------------------------------
 // ".json" is appended when the path has no extension.
 std::string withSceneExtension(const std::string& path);
+// A path that does not name an existing file: `path` (with the extension added) itself when it is free, otherwise the first
+// free "<stem>_2.json", "<stem>_3.json", ... next to it (a trailing "_<n>" of the stem is replaced, so saving "a_2.json"
+// again gives "a_3.json" and not "a_2_2.json"). Saving through this never overwrites a file, the shipped presets included.
+std::string uniqueScenePath(const std::string& path);
 // Writes the scene (creating missing parent folders). False with a message on failure.
 bool saveSceneToPath(const std::string& path, const Scene& scene, std::string& error);
 // Loads and validates a scene file; an empty scene name becomes the file name without extension.

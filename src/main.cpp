@@ -481,15 +481,26 @@ void applyPrefs(App& app)
     if (sim.infiniteFuel() != app.infiniteFuel) sim.setInfiniteFuel(app.infiniteFuel);
 }
 
+void logEvent(App& app, const Event& e);
+void resetStats(App& app);
+
 // RunControl replaces its driver on some operations (start from Stopped, stop, load, an edit while paused): whatever was cached
-// from the old one is dropped, the settings are re-applied. Call once per frame after RunControl::advance.
+// from the old one is dropped, the settings are re-applied and the stats start over (the new simulation has its own
+// reference energy and momentum). Call once per frame after RunControl::advance.
 void syncGeneration(App& app)
 {
     if (app.rc.generation() == app.seenGeneration) return;
     app.seenGeneration = app.rc.generation();
+    // Events the old simulation had computed past the display time and an edit cut off: log them while the names of the old
+    // simulation are still known, and keep the merges so a followed body that was absorbed leads to its survivor.
+    const std::vector<Event> cutOff = app.rc.takeFlushedEvents();
+    for (const Event& e : cutOff) logEvent(app, e);
     app.names.clear();
     app.survivorOf.clear();
+    for (const Event& e : cutOff)
+        if (e.type == EventType::Merge) app.survivorOf[e.other] = e.id;
     applyPrefs(app);
+    resetStats(app);
 }
 
 // Keys 1-9: the nine lowest body IDs of the scene as it starts (a merge must not renumber them)
@@ -756,7 +767,15 @@ public:
     int threadCount() const override { return app_.threads; }
     void setThreadCount(int n) override { app_.threads = n; applyPrefs(app_); }
     double controllerTick() const override { return app_.controllerTick; }
-    void setControllerTick(double s) override { app_.controllerTick = s; applyPrefs(app_); }
+    void setControllerTick(double s) override
+    {
+        if (!std::isfinite(s) || s <= 0.0) {   // the simulation ignores such a value: do not show one it does not use
+            app_.say("The controller tick must be a positive number of seconds");
+            return;
+        }
+        app_.controllerTick = s;
+        applyPrefs(app_);
+    }
     bool infiniteFuel() const override { return app_.infiniteFuel; }
     void setInfiniteFuel(bool on) override { app_.infiniteFuel = on; applyPrefs(app_); }
 

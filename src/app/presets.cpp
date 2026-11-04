@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <string>
+#include <system_error>
 #include "core/scene_json.h"
 
 namespace cosmos {
@@ -85,6 +87,24 @@ std::string withSceneExtension(const std::string& path)
     const fs::path p(path);
     if (p.has_extension()) return path;
     return path + ".json";
+}
+
+std::string uniqueScenePath(const std::string& path)
+{
+    const std::string full = withSceneExtension(path);
+    std::error_code ec;
+    if (!fs::exists(fs::path(full), ec)) return full;
+    const fs::path p(full);
+    std::string stem = p.stem().string();
+    const std::size_t us = stem.rfind('_');
+    if (us != std::string::npos && us + 1 < stem.size() &&
+        stem.find_first_not_of("0123456789", us + 1) == std::string::npos)
+        stem.erase(us);
+    for (int n = 2; n < 100000; ++n) {
+        const fs::path cand = p.parent_path() / (stem + "_" + std::to_string(n) + p.extension().string());
+        if (!fs::exists(cand, ec)) return cand.generic_string();
+    }
+    return full;
 }
 
 bool saveSceneToPath(const std::string& path, const Scene& scene, std::string& error)

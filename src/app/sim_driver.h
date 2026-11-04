@@ -132,6 +132,7 @@ public:
     const std::vector<Event>& dueEvents() const { return due_; }
     // Events produced by the physics that the display has not reached yet.
     std::size_t pendingEventCount() const { return pending_.size(); }
+    const std::vector<Event>& pendingEvents() const { return pending_; }
 
     // The simulation, for edits while paused (controllers, adding a shuttle) and for diagnostics. After an edit call
     // advance(0) or advanceTo(targetTime()) to refresh state().
