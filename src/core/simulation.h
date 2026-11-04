@@ -99,6 +99,9 @@ struct SimulationStats {
     long controllerTicks = 0;
     long shuttleForceCalls = 0;
     long shuttlesDestroyed = 0;  // ShuttleDestroyed events (surface contact or non-finite state)
+    // Wall-clock profile (cumulative, s; diagnostics only, never read by the physics): the body IAS15 step plus the swept
+    // body test, the shuttle pass setup (parent hierarchy, buffers) and the shuttle pass proper (thread pool run).
+    double bodySeconds = 0.0, shuttleSetupSeconds = 0.0, shuttleRunSeconds = 0.0;
 };
 
 class Simulation {

@@ -137,6 +137,38 @@ public:
     virtual std::size_t count() const = 0;
     virtual Vec3 position(std::size_t body, double t) const = 0;
     virtual Vec3 velocity(std::size_t body, double t) const = 0;
+    // All positions at one time: out[j] = position(j, t) bit for bit (an implementation may share work between bodies).
+    virtual void positions(double t, Vec3* out) const
+    {
+        const std::size_t n = count();
+        for (std::size_t j = 0; j < n; ++j) out[j] = position(j, t);
+    }
+};
+
+// The positions of all bodies at the last time asked for: the stages of a shuttle step, the step-end tests, the next step's
+// dominant-body search and the drag operators all ask for the same few times, so a single entry saves most of the
+// ephemeris evaluations. One per thread (it is not thread safe); keyed by the exact time, so it must be invalidated when the
+// ephemeris it was filled from changes (a new body step).
+class BodyPositionCache {
+public:
+    // out[j] = eph.position(j, t), bit for bit. The pointer stays valid until the next at() or invalidate().
+    const Vec3* at(const IBodyEphemeris& eph, double t)
+    {
+        const std::size_t n = eph.count();
+        if (!valid_ || t_ != t || pos_.size() != n) {
+            pos_.resize(n);
+            eph.positions(t, pos_.data());
+            t_ = t;
+            valid_ = true;
+        }
+        return pos_.data();
+    }
+    void invalidate() { valid_ = false; }
+
+private:
+    std::vector<Vec3> pos_;
+    double t_ = 0.0;
+    bool valid_ = false;
 };
 
 // The last accepted step of an IAS15 integrator (its dense output, plan 6.3/6.6). Valid for times in
@@ -152,6 +184,36 @@ public:
 
 private:
     const IAS15& ias_;
+};
+
+// The same dense output as Ias15Ephemeris, copied out of the integrator after each accepted step into a compact table with the
+// polynomial coefficients already divided by their constants (b_k / 72, b_k / 56, ... of ias15::positionAt), so an evaluation
+// costs the Horner chain and no divisions. The numbers are bit for bit those of Ias15Ephemeris (the divisions are the same
+// operations, only done once per step instead of once per call). Rebuild with build() after every IAS15 step.
+class DenseEphemeris final : public IBodyEphemeris {
+public:
+    void build(const IAS15& ias);
+    std::size_t count() const override { return n_; }
+    Vec3 position(std::size_t body, double t) const override;
+    Vec3 velocity(std::size_t body, double t) const override;
+    void positions(double t, Vec3* out) const override;
+    double startTime() const { return t0_; }
+    double endTime() const { return t1_; }
+
+private:
+    // One coordinate of one body: x0, v0 and the Horner coefficients of position (a0/2, b0/6 ... b6/72) and velocity
+    // (a0, b0/2 ... b6/8).
+    struct Coord {
+        double x0, v0;
+        double p[8];   // p[0] = a0 / 2, p[k] = b[k-1] / (6, 12, 20, 30, 42, 56, 72)[k-1]
+        double q[8];   // q[0] = a0,     q[k] = b[k-1] / (2, 3, 4, 5, 6, 7, 8)[k-1]
+    };
+    static double evalPosition(const Coord& c, double hh, double dt, double dt2);
+    static double evalVelocity(const Coord& c, double hh, double dt);
+
+    std::size_t n_ = 0;
+    double t0_ = 0.0, t1_ = 0.0, dt_ = 1.0, dt2_ = 1.0;
+    std::vector<Coord> c_;   // 3 per body
 };
 
 // Bodies moving in straight lines from their state in a Bodies store: r(t) = r + v (t - tRef). With zero velocities
@@ -246,6 +308,17 @@ struct ShuttleStats {
 // One accepted step of one shuttle. r0/v0 are the state at t0 and r1/v1 at t1 (the shuttle's whole motion in the step,
 // including the thrust and drag operators, which change v but never r). A swept shuttle-vs-body test can use the chord
 // r0 -> r1 against the bodies' positions at t0 and t1 (environment ephemeris), or a cubic Hermite path from r, v.
+//
+// A step of a shuttle that cannot thrust (see IController::rotationOnlyWhenDry) may contain controller ticks that change the
+// torque: `rotations` lists the heading and spin at each such tick inside the step, in time order (t0 < t < t1; heading
+// unwrapped like heading0/heading1, continuous). Between consecutive entries the torque is constant, so a cubic Hermite of
+// (heading, spin) through the entries is exact there, as through the step ends. The pointer is valid during the call only;
+// empty (count 0) for every other step.
+struct ShuttleRotationSample {
+    double t = 0.0;
+    double heading = 0.0, spin = 0.0;
+};
+
 struct ShuttleStepInfo {
     ShuttleId id = 0;
     std::size_t index = 0;
@@ -256,6 +329,15 @@ struct ShuttleStepInfo {
     // the pair is continuous; the torque is constant inside a step (steps end at controller ticks), hence the heading is
     // exactly quadratic in time between the two and a cubic Hermite of (heading, spin) reproduces it (plan 6.6).
     double heading0 = 0.0, spin0 = 0.0, heading1 = 0.0, spin1 = 0.0;
+    const ShuttleRotationSample* rotations = nullptr;
+    std::size_t rotationCount = 0;
+};
+
+// Per-thread working memory of propagateShuttle, reused between calls to avoid allocations and repeated work. Not thread safe;
+// one per task. positions must be invalidated when the ephemeris changes (a new body step).
+struct ShuttleScratch {
+    BodyPositionCache positions;
+    std::vector<ShuttleRotationSample> rotations;
 };
 
 // Hook for the collision logic (another module): called after every accepted step, in time order, on the thread that
@@ -282,7 +364,16 @@ public:
 // A dead shuttle or t1 <= t0 does nothing. A non-finite state kills the shuttle (ShuttleDestroyed, by = 0).
 // t0 must equal the time the shuttle was last left at (the previous call's t1); the bodies' ephemeris must cover [t0, t1].
 // stats (optional) accumulates counters.
+//
+// scratch (optional): the caller's working memory (the bodies' positions at the last time asked for, shared by the shuttles of
+// one thread within one body step to save ephemeris evaluations; invalidate scratch->positions when the ephemeris changes, and
+// never share it between threads). Null: private. The results are the same either way, bit for bit.
+//
+// A shuttle that cannot thrust and whose controller says rotationOnlyWhenDry() takes the steps its error control wants
+// (a controller tick inside the step is not a boundary): the heading and spin are advanced exactly through the ticks and
+// reported to the hook as ShuttleStepInfo::rotations.
 void propagateShuttle(Shuttles& s, std::size_t i, double t0, double t1, const ShuttleEnvironment& env,
-                      std::vector<Event>& events, IShuttleStepHook* hook = nullptr, ShuttleStats* stats = nullptr);
+                      std::vector<Event>& events, IShuttleStepHook* hook = nullptr, ShuttleStats* stats = nullptr,
+                      ShuttleScratch* scratch = nullptr);
 
 } // namespace cosmos

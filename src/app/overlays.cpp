@@ -1,5 +1,6 @@
 #include "app/overlays.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include "core/atmosphere.h"
@@ -187,7 +188,11 @@ void OverlayBuilder::build(const DisplayState& st, const Simulation& sim, std::u
     if (!(v.metresPerPixel > 0.0) || !std::isfinite(v.metresPerPixel)) v.metresPerPixel = 1.0;
     const FrameOrigin origin = frameOrigin(st, v);
 
+    using Clock = std::chrono::steady_clock;
+    auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+
     // Trails: record when shown (or when asked to keep the history), drop the history when switched off.
+    const Clock::time_point c0 = Clock::now();
     const bool recording = settings.trails || settings.keepTrailsWhileHidden;
     if (recording) {
         recordTrails(st, v);
@@ -196,10 +201,20 @@ void OverlayBuilder::build(const DisplayState& st, const Simulation& sim, std::u
         trails_.clear();
         trailsWereOn_ = false;
     }
+    const Clock::time_point c1 = Clock::now();
     if (settings.trails) drawTrails(st, v, origin, frame);
+    const Clock::time_point c2 = Clock::now();
     if (settings.osculatingOrbits) drawOrbits(st, v, frame);
+    const Clock::time_point c3 = Clock::now();
     updatePrediction(st, sim, v, origin, frame);
+    const Clock::time_point c4 = Clock::now();
     if (settings.velocityArrows || settings.accelerationArrows) drawArrows(st, sim, v, origin, frame);
+    const Clock::time_point c5 = Clock::now();
+    stats_.trailRecordMs = ms(c0, c1);
+    stats_.trailDrawMs = ms(c1, c2);
+    stats_.orbitsMs = ms(c2, c3);
+    stats_.predictMs = ms(c3, c4);
+    stats_.arrowsMs = ms(c4, c5);
 }
 
 // ---------------------------------------------------------------------------------------------------------------

@@ -88,6 +88,8 @@ struct OverlayStats {
     std::size_t predictedVertices = 0;
     bool predictionPending = false;       // a worker job is running or queued
     bool predictionDrawn = false;
+    // Wall time of this build() per part, ms (the benchmark's profile; negligible cost: five clock reads).
+    double trailRecordMs = 0.0, trailDrawMs = 0.0, orbitsMs = 0.0, predictMs = 0.0, arrowsMs = 0.0;
 };
 
 class OverlayBuilder {

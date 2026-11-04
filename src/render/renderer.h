@@ -62,6 +62,10 @@ struct RenderTotals {
     double wellsGpuMsLast = 0.0;
     double wellsGpuMsSum = 0.0;
     std::uint64_t wellsGpuSamples = 0;
+    // GPU span of a whole frame (gpuFrameBegin .. gpuFrameEnd: two GL_TIMESTAMP queries), read back a few frames late
+    double frameGpuMsLast = 0.0;
+    double frameGpuMsSum = 0.0;
+    std::uint64_t frameGpuSamples = 0;
 };
 
 enum class LinePass { Underlay, Overlay };
@@ -85,6 +89,12 @@ public:
     // Reads frame.explosions; does nothing without a live explosion. Call once per frame.
     virtual void drawExplosions() {}
     virtual void endFrame() = 0;
+
+    // Developer aid (release benchmark): bracket the GPU work of a whole frame (call gpuFrameBegin before beginFrame and
+    // gpuFrameEnd after the last draw, the UI included, before the buffer swap). The result of a frame is read back a few
+    // frames later without stalling (RenderTotals::frameGpuMsLast); a frame whose slot is still in flight is not timed.
+    virtual void gpuFrameBegin() {}
+    virtual void gpuFrameEnd() {}
 
     virtual const RenderStats& frameStats() const = 0;
     virtual const RenderTotals& totals() const = 0;

@@ -1,5 +1,6 @@
 #include "core/simulation.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <optional>
 #include "core/collisions.h"
@@ -177,9 +178,8 @@ private:
 // Private implementation
 
 struct Simulation::Impl {
-    explicit Impl(const IAS15& ias) : ephemeris(ias) {}
-
-    Ias15Ephemeris ephemeris;
+    // The dense output of the latest body step, copied out of ias_ for the shuttle pass (DenseEphemeris::build per body step).
+    DenseEphemeris ephemeris;
     std::optional<ShuttleEnvironment> env;
     HierarchyParents parents;
 
@@ -187,6 +187,7 @@ struct Simulation::Impl {
     struct TaskScratch {
         std::vector<ShuttleBodyHit> hits;
         std::vector<Vec3> endPos, prevEndPos;   // body positions at the end of the shuttle's previous / this step
+        ShuttleScratch work;                    // propagateShuttle's scratch: body positions at the last time asked for, ...
     };
     std::vector<std::vector<Event>> taskEvents;
     std::vector<ShuttleStats> taskStats;
@@ -202,9 +203,9 @@ class SweptHook final : public IShuttleStepHook {
 public:
     SweptHook(const ShuttleEnvironment& env, const Shuttles& shuttles, std::vector<ShuttleLastStep>& lastStep,
               std::vector<std::vector<ShuttleSample>>& paths, bool recordPaths, std::vector<ShuttleBodyHit>& hits,
-              std::vector<Vec3>& endPos, std::vector<Vec3>& prevEndPos)
+              std::vector<Vec3>& endPos, std::vector<Vec3>& prevEndPos, BodyPositionCache& cache)
         : env_(env), shuttles_(shuttles), lastStep_(lastStep), paths_(paths), record_(recordPaths), hits_(hits),
-          endPos_(endPos), prevEnd_(prevEndPos)
+          endPos_(endPos), prevEnd_(prevEndPos), cache_(cache)
     {
     }
 
@@ -236,9 +237,10 @@ public:
         const bool reuse = cachedShuttle_ == s.index && cachedT_ == s.t0 && prevEnd.size() == n;
 
         hits.clear();
+        const Vec3* end = cache_.at(eph, s.t1);   // the propagator evaluated these for its last stage: no new evaluation
         for (std::size_t j = 0; j < n; ++j) {
             const Vec3 b0 = reuse ? prevEnd[j] : eph.position(j, s.t0);
-            const Vec3 b1 = eph.position(j, s.t1);
+            const Vec3 b1 = end[j];
             endPos[j] = b1;
             const SweptShuttleBody c = sweptShuttleVsBody(s.r0, s.r1, b0, b1, dt, B.radius[j], rs, env_.atmosphereTop[j]);
             if (c.surface || c.atmosphere) hits.push_back({j, B.ids[j], c});
@@ -283,9 +285,30 @@ public:
             // The step's own headings are relative to its start (wrapped there); chain them onto the previous sample so
             // the whole path is continuous.
             std::vector<ShuttleSample>& path = paths_[s.index];
-            ShuttleSample p = to;
-            if (!path.empty()) p.heading = path.back().heading + (to.heading - from.heading);
-            path.push_back(p);
+            if (s.rotationCount > 0 && !killer) {
+                // Controller ticks inside the step (a shuttle that cannot thrust): one sample per tick with the exact heading
+                // and spin; the position and velocity there come from the cubic Hermite of the step, which is what the
+                // display would use without these samples (a Hermite through samples of a cubic is that cubic).
+                double prevHeading = from.heading;
+                for (std::size_t m = 0; m < s.rotationCount; ++m) {
+                    const ShuttleRotationSample& q = s.rotations[m];
+                    ShuttleSample p;
+                    p.t = q.t;
+                    p.r = hermitePosition(from, to, q.t);
+                    p.v = hermiteVelocity(from, to, q.t);
+                    p.heading = (path.empty() ? from.heading : path.back().heading) + (q.heading - prevHeading);
+                    p.spin = q.spin;
+                    prevHeading = q.heading;
+                    path.push_back(p);
+                }
+                ShuttleSample p = to;
+                p.heading = (path.empty() ? from.heading : path.back().heading) + (to.heading - prevHeading);
+                path.push_back(p);
+            } else {
+                ShuttleSample p = to;
+                if (!path.empty()) p.heading = path.back().heading + (to.heading - from.heading);
+                path.push_back(p);
+            }
         }
         return killer == nullptr;
     }
@@ -299,6 +322,7 @@ private:
     std::vector<ShuttleBodyHit>& hits_;
     std::vector<Vec3>& endPos_;
     std::vector<Vec3>& prevEnd_;
+    BodyPositionCache& cache_;
     std::size_t cachedShuttle_ = kNpos;
     double cachedT_ = 0.0;
 };
@@ -318,7 +342,7 @@ Simulation::Simulation(const ResolvedScene& scene, const SceneSettings& settings
       recordPaths_(options.recordShuttlePaths),
       tolerance_(options.shuttleTolerance),
       pool_(options.threads),
-      impl_(new Impl(ias_))
+      impl_(new Impl())
 {
     force_ = [this](const BodyState& s, Accel& a) { computeAccelerations(s, bodies_.mu, bodies_.radius, a); };
     shuttles_.infiniteFuel = settings.infiniteFuel;
@@ -463,6 +487,7 @@ bool Simulation::stepBodies()
         needReset_ = false;
     }
     const double t0 = t_;
+    const auto wallStart = std::chrono::steady_clock::now();
     backup_ = ias_;
     work_ = bodies_.state;
     double t = t0;
@@ -517,6 +542,8 @@ bool Simulation::stepBodies()
     stepT1_ = s1;
     stepIds_ = bodies_.ids;
     haveStep_ = true;
+    const auto wallShuttles = std::chrono::steady_clock::now();
+    stats_.bodySeconds += std::chrono::duration<double>(wallShuttles - wallStart).count();
     advanceShuttles(s0, s1);
 
     // 4. Commit the bodies and merge the pairs that touch at the end of the step.
@@ -565,8 +592,10 @@ void Simulation::advanceShuttles(double t0, double t1)
     }
     if (n == 0 || shuttles_.aliveCount() == 0) return;
 
+    const auto wallSetup = std::chrono::steady_clock::now();
     prepareEnvironment();
     Impl& I = *impl_;
+    I.ephemeris.build(ias_);
     I.parents.build(bodies_, I.ephemeris, t0); // bodies_.state is still the state at the start of the step
     const ShuttleEnvironment& env = *I.env;
 
@@ -576,14 +605,17 @@ void Simulation::advanceShuttles(double t0, double t1)
     I.scratch.resize(tasks);
     for (auto& e : I.taskEvents) e.clear();
 
+    const auto wallRun = std::chrono::steady_clock::now();
+    stats_.shuttleSetupSeconds += std::chrono::duration<double>(wallRun - wallSetup).count();
     pool_.run(tasks, [&](std::size_t k) {
         const std::size_t lo = k * n / tasks, hi = (k + 1) * n / tasks;
         Impl::TaskScratch& sc = I.scratch[k];
-        SweptHook hook(env, shuttles_, lastStep_, paths_, recordPaths_, sc.hits, sc.endPos, sc.prevEndPos);
+        sc.work.positions.invalidate();   // a new body step: the dense output changed
+        SweptHook hook(env, shuttles_, lastStep_, paths_, recordPaths_, sc.hits, sc.endPos, sc.prevEndPos, sc.work.positions);
         for (std::size_t i = lo; i < hi; ++i) {
             if (shuttles_.alive[i] == 0) continue;
             hook.beginShuttle();
-            propagateShuttle(shuttles_, i, t0, t1, env, I.taskEvents[k], &hook, &I.taskStats[k]);
+            propagateShuttle(shuttles_, i, t0, t1, env, I.taskEvents[k], &hook, &I.taskStats[k], &sc.work);
             if (shuttles_.alive[i] == 0 && hook.killed) {
                 // Destroyed on touching a body: the shuttle ends at the contact point (the hook recorded it)
                 shuttles_.state.x[i] = hook.killPoint.x;
@@ -596,6 +628,7 @@ void Simulation::advanceShuttles(double t0, double t1)
         }
     });
 
+    stats_.shuttleRunSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - wallRun).count();
     // Per-thread buffers into one queue sorted by (t, id) (plan 4.5 step 3)
     const EventQueue merged = EventQueue::merge(I.taskEvents);
     for (const Event& e : merged.events())
