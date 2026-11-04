@@ -18,6 +18,7 @@
 // p_origin(t) is the frame origin's own trail evaluated at t (Hermite). The vertex times are the union of the object's
 // and the origin's sample times, so the polyline is accurate in the moving frame even when the object itself is nearly
 // straight (a star seen from a planet) - a body circling its moving parent is drawn as a closed loop.
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
@@ -34,12 +35,21 @@ struct TrailSample {
     double vx = 0.0, vy = 0.0; // inertial velocity, m/s
 };
 
-constexpr std::size_t kTrailCapacity = 4096;           // stored samples per object
+constexpr std::size_t kTrailCapacity = 4096;           // stored samples per object (a power of two: the ring is masked)
+static_assert((kTrailCapacity & (kTrailCapacity - 1)) == 0, "the trail ring is addressed with a mask");
 constexpr double kTrailTurnRad = 3.0 * 3.14159265358979323846 / 180.0;
 constexpr double kTrailSpacingPx = 6.0;                // arc-length spacing used by the overlay builder
 
 // Cubic Hermite position at t between a and b (t clamped to [a.t, b.t]).
 void hermiteXY(const TrailSample& a, const TrailSample& b, double t, double& x, double& y);
+
+// Samples per block of the ring and the bounding box of a block. The box covers every sample the block holds (and, after the
+// ring wraps or is cleared, possibly older ones it still holds: it never shrinks except when a block is started again), so a
+// block whose box misses the view has no chord that reaches it.
+constexpr std::size_t kTrailBlock = 64;
+struct TrailBox {
+    double x0 = 0.0, x1 = 0.0, y0 = 0.0, y1 = 0.0;
+};
 
 class Trail {
 public:
@@ -51,8 +61,20 @@ public:
     // stored one only refreshes the head.
     bool record(const TrailSample& s, double minSpacing, double turnRad = kTrailTurnRad);
 
+    // The number of stored samples from logical index k to the end of the 64-sample block that holds k (0 when k is not a
+    // stored sample) and that block's bounding box.
+    std::size_t blockRun(std::size_t k, TrailBox& box) const
+    {
+        if (k >= count_) return 0;
+        const std::size_t phys = (start_ + k) & (kTrailCapacity - 1);
+        box = boxes_[phys / kTrailBlock];
+        return std::min(kTrailBlock - (phys & (kTrailBlock - 1)), count_ - k);
+    }
+
     std::size_t storedCount() const { return count_; }
-    const TrailSample& stored(std::size_t k) const { return buf_[(start_ + k) % buf_.size()]; }   // 0 = oldest
+    // 0 = oldest. The ring is addressed with a mask (a division per access dominated the draw): while it grows start_ is 0 and
+    // k < size, and once full the size is kTrailCapacity, a power of two.
+    const TrailSample& stored(std::size_t k) const { return buf_[(start_ + k) & (kTrailCapacity - 1)]; }
     const TrailSample& head() const { return head_; }
 
     // Stored samples plus the head when it is newer than the newest stored one: the polyline the trail draws.
@@ -66,6 +88,7 @@ private:
     void store(const TrailSample& s);
 
     std::vector<TrailSample> buf_;
+    std::vector<TrailBox> boxes_;
     std::size_t start_ = 0, count_ = 0;
     TrailSample head_;
     bool haveHead_ = false;
@@ -74,11 +97,12 @@ private:
 // Evaluates a trail at non-decreasing times (a forward-only cursor: O(1) amortised per call).
 class TrailCursor {
 public:
-    explicit TrailCursor(const Trail* trail) : trail_(trail) {}
+    explicit TrailCursor(const Trail* trail) : trail_(trail), n_(trail ? trail->sampleCount() : 0) {}
     void eval(double t, double& x, double& y);
 
 private:
     const Trail* trail_;
+    std::size_t n_ = 0;     // the trail must not change while the cursor is in use
     std::size_t seg_ = 0;
 };
 
@@ -90,6 +114,12 @@ struct TrailDrawParams {
     Rgba colour;                 // alpha is the opacity at the head; it fades linearly to ~0 at the tail
     float widthPx = 1.5f;
     double minStepPx = 1.0;      // vertices closer than this to the previous one are dropped
+    // View culling (the camera-relative rectangle [-cullHalfW, cullHalfW] x [-cullHalfH, cullHalfH] in metres, plus
+    // cullMarginPx pixels): a polyline chord whose bounding box misses it cannot put a pixel on the screen and is not emitted
+    // (the strip is cut there and restarts at the first chord that reaches the view). The vertices that are emitted are the
+    // ones an unculled draw produces, so what is visible is unchanged. Infinite (the default) = no culling.
+    double cullHalfW = 1e300, cullHalfH = 1e300;
+    double cullMarginPx = 8.0;
 };
 
 // Appends one strip to the batch. `origin` is the frame origin's trail (null for the inertial frame; the offsets then

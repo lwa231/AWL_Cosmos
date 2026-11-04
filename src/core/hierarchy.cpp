@@ -152,4 +152,37 @@ int shuttleParent(const Hierarchy& h, const Vec3& position)
     return best;
 }
 
+void buildHillTable(const Hierarchy& h, HillTable& out)
+{
+    const std::size_t n = h.nodes.size();
+    out.hill.resize(n);
+    out.depth.resize(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        out.hill[i] = hillRadius(h, static_cast<int>(i));
+        out.depth[i] = depthOf(h, static_cast<int>(i));
+    }
+}
+
+int shuttleParent(const Hierarchy& h, const HillTable& table, const Vec3& position)
+{
+    int best = h.root;
+    if (best == -1) return -1;
+    ParentCandidate bestC;
+    bool have = false;
+
+    for (int i = 0; i < static_cast<int>(h.nodes.size()); ++i) {
+        if (i == h.root) continue;
+        const double d = norm(position - h.nodes[i].r);
+        const double rh = table.hill[static_cast<std::size_t>(i)];
+        if (!std::isfinite(rh) || d >= rh) continue;
+        const ParentCandidate c{rh, h.nodes[i].childA < 0, table.depth[static_cast<std::size_t>(i)], d};
+        if (!have || betterParent(c, bestC)) {
+            best = i;
+            bestC = c;
+            have = true;
+        }
+    }
+    return best;
+}
+
 } // namespace cosmos

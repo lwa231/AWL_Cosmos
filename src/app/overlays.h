@@ -19,6 +19,7 @@
 // frame allocates nothing else). Everything is skipped while its toggle is off; trail history is dropped while trails
 // are off unless keepTrailsWhileHidden is set.
 #include <cstdint>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 #include "app/camera.h"
@@ -30,6 +31,7 @@
 #include "app/render_frame.h"
 #include "app/sim_driver.h"
 #include "core/hierarchy.h"
+#include "core/threadpool.h"
 
 namespace cosmos {
 namespace app {
@@ -106,6 +108,10 @@ public:
     void setPredictorOptions(const SimulationOptions& options) { predictorOptions_ = options; }
     // The object whose path is predicted; None = the camera's follow target.
     void setPredictionTarget(TargetKind kind, std::uint64_t id) { predTarget_ = {kind, id}; }
+    // Worker threads for the trail and orbit geometry (not owned; null or one thread = the calling thread does it all). The
+    // work is cut into chunks of a fixed number of objects whatever the thread count and the chunks are concatenated in order,
+    // so the geometry is identical for every pool size. The pool must not be in use by another thread during build().
+    void setThreadPool(ThreadPool* pool) { pool_ = pool; }
 
     void build(const SimDriver& driver, std::uint64_t generation, const OverlayView& view, RenderFrame& frame);
     // The same from its parts (the driver's state() and sim()).
@@ -148,8 +154,10 @@ private:
                           RenderFrame& frame);
     void drawArrows(const DisplayState& st, const Simulation& sim, const OverlayView& view, const FrameOrigin& o,
                     RenderFrame& frame);
-    void appendOrbit(const Vec3& parentPos, const Vec3& parentVel, double muTotal, const Vec3& r, const Vec3& v,
-                     const Rgba& colour, const OverlayView& view, RenderFrame& frame);
+    // One orbit into `b` (using `curve` as scratch). True if something was drawn.
+    bool appendOrbit(const Vec3& parentPos, double muTotal, const Vec3& r, const Vec3& v, const Rgba& colour, const OverlayView& view,
+                     double halfDiag, LineBatch& b, OrbitCurve& curve) const;
+    void runChunks(std::size_t chunks, const std::function<void(std::size_t)>& fn);
     double predictionHorizon(const DisplayState& st, const PredictRequest& target);   // target: kind and id
 
     const ShuttlePalette* palette_ = nullptr;
@@ -166,6 +174,7 @@ private:
 
     // Hierarchy of the bodies of the current frame (built on demand).
     Hierarchy hier_;
+    HillTable hills_;
     bool haveHier_ = false;
     std::vector<Vec3> hr_, hv_;
     std::vector<double> hmu_;
@@ -183,7 +192,22 @@ private:
     bool reqLive_ = false;
 
     // Scratch (capacity kept between frames).
-    OrbitCurve curve_;
+    ThreadPool* pool_ = nullptr;
+    struct TrailItem {
+        const Trail* trail;
+        Rgba colour;
+    };
+    struct OrbitItem {
+        Vec3 parentPos;
+        double mu;
+        Vec3 r, v;
+        Rgba colour;
+    };
+    std::vector<TrailItem> trailItems_;
+    std::vector<OrbitItem> orbitItems_;
+    std::vector<LineBatch> chunkBatches_;       // one per chunk of trails / orbits (capacity kept)
+    std::vector<OrbitCurve> chunkCurves_;
+    std::vector<std::size_t> chunkCounts_;      // vertices / orbits drawn per chunk
     std::vector<ArrowItem> arrowItems_;
     BodyState accState_;
     std::vector<double> accMu_, accRadius_;

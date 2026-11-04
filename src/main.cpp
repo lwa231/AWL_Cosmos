@@ -37,6 +37,7 @@
 #include "app/units.h"
 #include "core/kinds.h"
 #include "core/scene_json.h"
+#include "core/threadpool.h"
 #include "render/renderer.h"
 #include "ui/bottom_bar.h"
 #include "ui/labels.h"
@@ -258,6 +259,7 @@ struct App {
     ui::LabelOptions labelOptions;
     SlowDown slowDown;               // warp step-down for approaching impacts (M7, plan 8)
     ExplosionSystem explosions;      // explosion registry; fills RenderFrame::explosions (M7, plan 9.7)
+    ThreadPool workers;              // frame-building workers (overlay geometry, line upload); the main thread takes part
     OverlayBuilder overlays;         // arrows, trails, osculating orbits, predicted path (M7, plan 9.5)
     RadiiCache radiiCache;           // throttled Hill / SOI / Roche radii for the circles
     double lastStatSimTime = -1.0e300;   // physics time of the last conservation sample
@@ -530,6 +532,7 @@ void applyPrefs(App& app)
 {
     Simulation& sim = app.rc.driver().sim();
     if (sim.threadCount() != app.threads) sim.setThreadCount(app.threads);
+    if (app.workers.threads() != app.threads) app.workers.resize(app.threads);
     if (sim.controllerTick() != app.controllerTick) sim.setControllerTick(app.controllerTick);
     if (sim.infiniteFuel() != app.infiniteFuel) sim.setInfiniteFuel(app.infiniteFuel);
 }
@@ -1316,6 +1319,8 @@ int run(const Options& opt)
         if (opt.mpp > 0.0) app.camera.setMetresPerPixel(opt.mpp);
         app.camera.update(app.state().t, app.src);
         applyOverlayFlag(app.bar.overlays, opt.overlays);
+        app.workers.resize(so.threads);
+        app.overlays.setThreadPool(&app.workers);
         app.overlays.setShuttlePalette(&app.palette);
         app.overlays.setPredictorOptions(runOptions.sim);   // the predicted path integrates like the live simulation
 

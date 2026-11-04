@@ -42,4 +42,14 @@ bool betterParent(const ParentCandidate& a, const ParentCandidate& b);
 // barycentre) if none. The dominant body's infinite sphere counts as the root.
 int shuttleParent(const Hierarchy& h, const Vec3& position);
 
+// The Hill radius and depth of every node, computed once for a hierarchy: choosing the parent of many points then costs a
+// distance per node instead of a recursive Hill radius (a cube root) per node and point.
+struct HillTable {
+    std::vector<double> hill;
+    std::vector<int> depth;
+};
+void buildHillTable(const Hierarchy& h, HillTable& out);
+// The same choice as shuttleParent(h, position), bit for bit; `table` must come from buildHillTable(h).
+int shuttleParent(const Hierarchy& h, const HillTable& table, const Vec3& position);
+
 } // namespace cosmos
