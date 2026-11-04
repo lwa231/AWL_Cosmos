@@ -4,6 +4,7 @@
 #include <glad/glad.h>   // must come BEFORE glfw3.h
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -166,6 +167,8 @@ struct App {
     std::string notice;
     double noticeUntil = 0.0;
     bool quit = false;
+    // Bodies of the keys 1-9: the nine lowest IDs of the starting scene, fixed once (a merge must not renumber the keys)
+    std::array<std::uint64_t, 9> numberKeys{};
 
     Viewport viewport() const { return {fbW, fbH}; }
     double pixelScale() const { return winW > 0 ? static_cast<double>(fbW) / winW : 1.0; }   // window units -> pixels
@@ -463,16 +466,23 @@ void keyCallback(GLFWwindow* w, int key, int, int action, int mods)
     case GLFW_KEY_R: setFrameMode(*app, FrameMode::FollowBody); break;
     case GLFW_KEY_H:
     case GLFW_KEY_HOME: resetView(*app); break;
-    case GLFW_KEY_ESCAPE:
+    case GLFW_KEY_ESCAPE:   // only stops following; quitting is the window close button or Ctrl+Q
         if (app->camera.following().active()) { app->camera.stopFollowing(); app->say("Stopped following"); }
-        else app->quit = true;
+        break;
+    case GLFW_KEY_Q:
+        if (mods & GLFW_MOD_CONTROL) app->quit = true;
         break;
     default:
-        // 1-9: follow the n-th body (ID order); in Lucerna 4 is Domus.
+        // 1-9: follow the n-th body of the starting scene (ID order); in Lucerna 4 is Domus. The table is fixed at start,
+        // so a merge never renumbers the keys; a body that has merged away leads to the body that absorbed it.
         if (key >= GLFW_KEY_1 && key <= GLFW_KEY_9) {
-            const std::size_t n = static_cast<std::size_t>(key - GLFW_KEY_1);
-            const auto& bodies = app->state().bodies;
-            if (n < bodies.size()) followTarget(*app, TargetKind::Body, bodies[n].id, true);
+            std::uint64_t id = app->numberKeys[static_cast<std::size_t>(key - GLFW_KEY_1)];
+            for (int hops = 0; id != 0 && hops < 16; ++hops) {
+                if (app->bodyIndex.count(id)) { followTarget(*app, TargetKind::Body, id, true); break; }
+                auto it = app->survivorOf.find(id);
+                if (it == app->survivorOf.end()) { app->say(nameOf(*app, id) + " is gone"); break; }
+                id = it->second;
+            }
         }
         break;
     }
@@ -587,7 +597,7 @@ std::string buildTitle(const App& app, double achievedRate)
 void printHelp()
 {
     std::cout << "Keys: wheel = zoom at cursor, drag = pan, click = follow, +/- PgUp/PgDn = zoom, . / , = warp up/down, / = 1x, Space = pause,\n"
-                 "      1-9 = follow body n (4 = Domus), F / Tab (+Shift) = cycle follow target, Esc = stop following (then quit),\n"
+                 "      1-9 = follow body n (4 = Domus), F / Tab (+Shift) = cycle follow target, Esc = stop following, Ctrl+Q = quit,\n"
                  "      0 / B / R = inertial / barycentre / relative-to-followed-body frame, H = fit the system\n";
 }
 
@@ -679,6 +689,12 @@ int run(const Options& opt)
         for (const std::string& w : app.driver->sim().warnings()) std::cerr << "Simulation warning: " << w << "\n";
         buildSources(app);
         rebuildLookups(app);
+        {
+            std::vector<std::uint64_t> ids;
+            for (const DisplayBody& b : app.state().bodies) ids.push_back(b.id);
+            std::sort(ids.begin(), ids.end());
+            for (std::size_t k = 0; k < app.numberKeys.size() && k < ids.size(); ++k) app.numberKeys[k] = ids[k];
+        }
         std::cout << "Scene " << scene.name << ": " << app.state().bodies.size() << " bodies, " << app.state().shuttles.size()
                   << " shuttles, " << so.threads << " threads\n";
         printHelp();

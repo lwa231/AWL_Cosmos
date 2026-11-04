@@ -38,7 +38,9 @@ namespace app {
 struct DriverOptions {
     double maxFrameDt = SimClock::kDefaultMaxFrameDt;   // s, real time (SimClock)
     // Wall-time cap of the physics per frame, s (25 ms leaves room for drawing at 144 Hz when the physics is the only
-    // load). <= 0 means no cap (headless runs, tests).
+    // load). <= 0 means no cap (headless runs, tests). The cap is soft by one body step: it is checked between steps, so
+    // a frame can overshoot it by the cost of the last step (measured 30-40 ms for the first frames at 100,000x in Release,
+    // start-up warm-up of the thread pool; under 11 ms afterwards). No trajectory is affected, only the frame time.
     double physicsBudget_s = 0.025;
 };
 
@@ -64,7 +66,7 @@ struct DisplayShuttle {
     std::size_t index = 0;       // index into sim().shuttles()
     Vec3 r;                      // m
     Vec3 v;                      // m/s
-    double heading = 0.0;        // rad (extrapolated back from the end of its last step with the spin and torque)
+    double heading = 0.0;        // rad, Hermite of the recorded samples; defined modulo 2 pi (it is continuous inside a body step only up to whole turns)
     double spin = 0.0;           // rad/s
     double throttle = 0.0;       // 0..1, the held command
     bool interpolated = false;   // from the recorded steps (false: it has not stepped yet)

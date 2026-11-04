@@ -182,7 +182,7 @@
     { "id": 1001, "name": "Shuttle 1", "controller": "Coast",
       "orbit": { "parent": 4, "a": 7.2e5, "e": 0.0, "argPeriapsis_deg": 0.0, "meanAnomaly_deg": 0.0, "retrograde": false } },
     { "id": 1002, "name": "Shuttle 2", "controller": "Coast",
-      "orbit": { "parent": 4, "a": 7.2e5, "e": 0.0, "argPeriapsis_deg": 0.0, "meanAnomaly_deg": 180.0, "retrograde": false } },
+      "orbit": { "parent": 4, "a": 7.25e5, "e": 0.0092, "argPeriapsis_deg": 0.0, "meanAnomaly_deg": 180.0, "retrograde": false } },
     { "id": 1003, "name": "Shuttle 3", "controller": "Prograde",
       "orbit": { "parent": 4, "a": 1.2e6, "e": 0.0, "argPeriapsis_deg": 0.0, "meanAnomaly_deg": 90.0, "retrograde": false } },
     { "id": 1004, "name": "Shuttle 4", "controller": "Wander",

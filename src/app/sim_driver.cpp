@@ -266,12 +266,10 @@ void SimDriver::buildState(double t, DisplayState& out) const
         d.v = s.shuttleVelocityAt(i, t);
         d.interpolated = s.shuttlePath(i).size() >= 2 || ls.to.t > ls.from.t;
         d.throttle = S.throttle[i];
-        // Heading and spin are stored at the end of the last step (ls.to.t); go back with the held torque (5.7: spin is
-        // linear and the angle quadratic in time under constant torque). Purely visual.
-        const double back = std::max(0.0, ls.to.t - t);
-        const double alpha = S.maxTorque[i] * S.turn[i] / S.inertia[i];
-        d.heading = S.heading[i] - S.spin[i] * back + 0.5 * alpha * back * back;
-        d.spin = S.spin[i] - alpha * back;
+        // Heading and spin: Hermite of the recorded samples, like the position (the torque is constant between samples,
+        // so this is exact there and continuous across steps). Purely visual.
+        d.heading = s.shuttleHeadingAt(i, t);
+        d.spin = s.shuttleSpinAt(i, t);
         out.shuttles.push_back(d);
     }
 }

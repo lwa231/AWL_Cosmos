@@ -4,6 +4,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include "core/atmosphere.h"
 #include "core/events.h"
 #include "core/scene_json.h"
 #include "core/simulation.h"
@@ -35,15 +36,15 @@ TEST_SUITE("app_lucerna_scene")
             REQUIRE(pi >= 0);
             const SceneBody& parent = scene.bodies[static_cast<std::size_t>(pi)];
             CHECK((parent.name == "Domus" || parent.name == "Custos" || parent.name == "Gelu"));
-            // Clear of the surface: 100 km above it where there is air (Domus's air tops out near 98 km, plan 13), so the
-            // Coast shuttles stay out of it and the burning ones start outside it; 20 % of the radius for the airless moons
+            // Outside the air at the start (Domus's air tops out near 98 km, plan 13); 20 % of the radius above the surface
+            // for the airless moons
             const double periapsis = sh.orbit->a * (1.0 - sh.orbit->e);
-            CHECK(periapsis >= (parent.atmosphere ? parent.radius + 1.0e5 : 1.2 * parent.radius));
+            CHECK(periapsis >= (parent.atmosphere ? parent.radius + atmosphereTop(*parent.atmosphere) : 1.2 * parent.radius));
         }
         CHECK(controllers.size() >= 4);   // Coast, Prograde, Retrograde and Wander all appear
     }
 
-    TEST_CASE("the shipped shuttles fly a day: Coast orbits keep their radius, the Retrograde one is destroyed by Domus")
+    TEST_CASE("the shipped shuttles fly a day: Coast orbits keep their radius, the Retrograde one is destroyed by Domus, the others survive")
     {
         Scene scene;
         std::string err;
@@ -88,6 +89,9 @@ TEST_SUITE("app_lucerna_scene")
                 worstCoast = std::max(worstCoast, worst[i]);
                 CHECK(worst[i] < 0.05);
             }
+            // Everything but the Retrograde demo lives through the day (Shuttle 2 grazes the top of Domus's air and only
+            // comes down after about 150 days; measured with the probe of the M4 review, 300 days: no other loss)
+            if (sc.controller != "Retrograde") CHECK(sim.shuttles().alive[i] == 1);
             if (sc.controller == "Retrograde") {
                 CHECK(sim.shuttles().alive[i] == 0);
                 bool destroyedByDomus = false;

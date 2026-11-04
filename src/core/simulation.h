@@ -67,6 +67,12 @@ struct ShuttleSample {
     double t = 0.0;
     Vec3 r;
     Vec3 v;
+    // Heading and spin of the hull (rad, rad/s) for drawing it between steps. Within one recorded path (and within one
+    // ShuttleLastStep) the heading is continuous: it is NOT wrapped to [-pi, pi], so the difference of two neighbouring
+    // samples is the rotation between them. Each path starts at the shuttle's wrapped heading, so two paths (two body
+    // steps) agree only modulo 2 pi.
+    double heading = 0.0;
+    double spin = 0.0;
 };
 
 // The last accepted step of one shuttle: [from.t, to.t]. For a shuttle that has not stepped yet from == to == its start.
@@ -80,6 +86,9 @@ struct ShuttleLastStep {
 Vec3 hermitePosition(const ShuttleSample& a, const ShuttleSample& b, double t);
 // Its derivative, the velocity of the interpolant.
 Vec3 hermiteVelocity(const ShuttleSample& a, const ShuttleSample& b, double t);
+// Cubic Hermite of the hull heading (derivative = spin) and its derivative, the spin. Exact for a constant torque.
+double hermiteHeading(const ShuttleSample& a, const ShuttleSample& b, double t);
+double hermiteSpin(const ShuttleSample& a, const ShuttleSample& b, double t);
 
 struct SimulationStats {
     long bodySteps = 0;          // accepted IAS15 steps (including clipped ones)
@@ -143,6 +152,10 @@ public:
     // otherwise inside the last step; t outside the available span is clamped to its ends.
     Vec3 shuttlePositionAt(std::size_t i, double t) const;
     Vec3 shuttleVelocityAt(std::size_t i, double t) const;
+    // Hull heading (rad, modulo 2 pi across body steps, see ShuttleSample) and spin (rad/s) of shuttle i at t, from the
+    // same samples.
+    double shuttleHeadingAt(std::size_t i, double t) const;
+    double shuttleSpinAt(std::size_t i, double t) const;
 
     // ---- Events, diagnostics -----------------------------------------------------------------------------------
     // Hand over all events since the last call, sorted by (t, id) (plan 4.5 step 3).
