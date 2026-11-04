@@ -1,7 +1,6 @@
 #pragma once
 #include <vector>
 #include <cmath>
-#include "GraphicsObData.h"
 
 //Physics Consts
 static constexpr double G = 1.0;
@@ -54,7 +53,6 @@ class SimLogic
         {
             double x, y, vx, vy, mass, radius;
             float color[3];
-            Shape shape = Shape::Circle;
             BodyKind kind = BodyKind::Planet;
         };
         void pushBody()
