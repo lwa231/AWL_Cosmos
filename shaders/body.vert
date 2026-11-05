@@ -1,5 +1,6 @@
 #version 450 core
-// Sphere impostors: one instanced quad per body, the disc is carved in the fragment shader.
+// Sphere impostors: one instanced quad per body, the disc is carved in the fragment shader. Stars get a larger quad for
+// the corona and bloom, black holes one for the accretion disk.
 #include "common.glsl"
 #include "bodies.glsl"
 
@@ -16,6 +17,12 @@ void main()
     float radiusPx = b.radius * uScale.y;
     float drawRadius = max(radiusPx, 0.5 * uScale.w);
     float halfSize = drawRadius + 1.5;                      // margin for the anti-aliased edge
+    if (b.style == STYLE_STAR) {
+        float bloom = starBloomPx(drawRadius) * (uVisual.x >= 1.0 ? 16.0 : 6.0);
+        halfSize = max(drawRadius * STAR_CORONA, drawRadius + bloom) + 1.5;
+    } else if (b.style == STYLE_BH) {
+        halfSize = bhUnitPx(radiusPx) * BH_EXTENT + 1.5;
+    }
 
     vec2 centrePx = vec2(b.x, b.y) * uScale.y;
     // The quad is clamped to the viewport (plus a margin): a planet far larger than the screen then covers it with a

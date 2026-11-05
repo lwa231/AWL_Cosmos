@@ -22,14 +22,19 @@ struct FrameUbo {
     float scale[4];       // metres per pixel, pixels per metre, time, minimum body diameter in pixels
     std::uint32_t counts[4];   // bodies, lights, shuttles, gravity-well sources
     float shuttle[4];     // hull length in metres, minimum hull length in pixels, 0, 0
+    float visual[4];      // body quality, skybox quality, skybox seed (0..1), 0
 };
-static_assert(sizeof(FrameUbo) == 64 + 16 * 4, "FrameUbo must match the std140 block");
+static_assert(sizeof(FrameUbo) == 64 + 16 * 5, "FrameUbo must match the std140 block");
 
 // std430 storage buffer entries
-struct BodyGpu {          // 32 bytes
+struct BodyGpu {          // 80 bytes (shaders/bodies.glsl)
     float x, y, radius, ambient;
     float r, g, b;
     std::uint32_t flags;  // bit 0 flat, bit 1 black hole
+    std::uint32_t style;  // app::BodyStyle
+    float temperature, seed, spinPhase;
+    float detail, cloudCover, atmRim, pad0;
+    float p0, p1, p2, pad1;   // planets: atmosphere tint; black holes: accretion-disk normal
 };
 struct LightGpu {         // 32 bytes
     float x, y, intensity, pad0;
@@ -61,7 +66,7 @@ struct CircleGpu {        // 16 bytes (shaders/circle.vert)
     std::uint32_t kind;
 };
 static_assert(sizeof(WellGpu) == 16 && sizeof(AtmosphereGpu) == 32 && sizeof(CircleGpu) == 16, "M7 pass layouts");
-static_assert(sizeof(BodyGpu) == 32 && sizeof(LightGpu) == 32, "body/light layout");
+static_assert(sizeof(BodyGpu) == 80 && sizeof(LightGpu) == 32, "body/light layout");
 static_assert(sizeof(ShuttleGpu) == 64 && sizeof(SegmentGpu) == 64, "shuttle/segment layout");
 
 constexpr std::uint32_t kBodyFlat = 1u;
@@ -106,6 +111,7 @@ public:
     void resize(int w, int h) override;
     void beginFrame(const app::RenderFrame& frame) override;
     void drawGravityWells() override;
+    void drawSkybox() override;
     void drawAtmospheres() override;
     void drawCircles() override;
     void drawBodies() override;
@@ -132,7 +138,7 @@ private:
     bool initialised_ = false;
     bool debugCallbackSet_ = false;
     unsigned int progBodies_ = 0, progShuttles_ = 0, progLines_ = 0;
-    unsigned int progWells_ = 0, progAtmospheres_ = 0, progCircles_ = 0;
+    unsigned int progWells_ = 0, progAtmospheres_ = 0, progCircles_ = 0, progSkybox_ = 0;
     unsigned int wellQuery_[2] = {0, 0};     // GL_TIME_ELAPSED of the ring pass, read back a frame or two late
     bool wellQueryPending_[2] = {false, false};
     int wellQueryNext_ = 0;
@@ -180,7 +186,8 @@ bool GlRenderer::init(const RendererConfig& config)
     progWells_ = buildProgram(config.shaderDir, "well.vert", "well.frag");
     progAtmospheres_ = buildProgram(config.shaderDir, "atmosphere.vert", "atmosphere.frag");
     progCircles_ = buildProgram(config.shaderDir, "circle.vert", "circle.frag");
-    if (!progBodies_ || !progShuttles_ || !progLines_ || !progWells_ || !progAtmospheres_ || !progCircles_) {
+    progSkybox_ = buildProgram(config.shaderDir, "well.vert", "skybox.frag");   // well.vert: the full-screen triangle
+    if (!progBodies_ || !progShuttles_ || !progLines_ || !progWells_ || !progAtmospheres_ || !progCircles_ || !progSkybox_) {
         shutdown();
         return false;
     }
@@ -224,6 +231,7 @@ void GlRenderer::shutdown()
     if (progWells_) glDeleteProgram(progWells_);
     if (progAtmospheres_) glDeleteProgram(progAtmospheres_);
     if (progCircles_) glDeleteProgram(progCircles_);
+    if (progSkybox_) glDeleteProgram(progSkybox_);
     if (wellQuery_[0]) glDeleteQueries(2, wellQuery_);
     wellQuery_[0] = wellQuery_[1] = 0;
     wellQueryPending_[0] = wellQueryPending_[1] = false;
@@ -233,7 +241,7 @@ void GlRenderer::shutdown()
         frameQueryPending_[i] = false;
     }
     frameQueryOpen_ = false;
-    vao_ = progBodies_ = progShuttles_ = progLines_ = progWells_ = progAtmospheres_ = progCircles_ = 0;
+    vao_ = progBodies_ = progShuttles_ = progLines_ = progWells_ = progAtmospheres_ = progCircles_ = progSkybox_ = 0;
     initialised_ = false;
     inFrame_ = false;
     frame_ = nullptr;
@@ -351,6 +359,9 @@ void GlRenderer::beginFrame(const app::RenderFrame& frame)
     u.counts[0] = bodies_.count; u.counts[1] = lights_.count; u.counts[2] = shuttles_.count; u.counts[3] = wells_.count;
     u.shuttle[0] = frame.shuttleLengthMetres;
     u.shuttle[1] = frame.shuttleMinPixels;
+    u.visual[0] = static_cast<float>(std::min(std::max(frame.bodyQuality, 0), 2));
+    u.visual[1] = static_cast<float>(std::min(frame.skyboxQuality, 2));
+    u.visual[2] = static_cast<float>(frame.skyboxSeed % 16777216u) / 16777216.0f;
     std::memcpy(ubo, &u, sizeof(u));
 
     for (const app::RenderBody& b : frame.bodies) {
@@ -358,6 +369,15 @@ void GlRenderer::beginFrame(const app::RenderFrame& frame)
         g.x = b.x; g.y = b.y; g.radius = b.radius; g.ambient = b.ambient;
         g.r = b.colour.r; g.g = b.colour.g; g.b = b.colour.b;
         g.flags = ((b.emissive || !b.receivesLight) ? kBodyFlat : 0u) | (b.isBlackHole ? kBodyBlackHole : 0u);
+        g.style = static_cast<std::uint32_t>(b.style);
+        g.temperature = b.temperature; g.seed = b.seed; g.spinPhase = b.spinPhase;
+        g.detail = b.detail; g.cloudCover = b.cloudCover; g.atmRim = b.atmosphereRim; g.pad0 = 0.0f;
+        if (b.style == app::BodyStyle::BlackHole) {
+            g.p0 = b.diskNormal[0]; g.p1 = b.diskNormal[1]; g.p2 = b.diskNormal[2];
+        } else {
+            g.p0 = b.atmosphereTint.r; g.p1 = b.atmosphereTint.g; g.p2 = b.atmosphereTint.b;
+        }
+        g.pad1 = 0.0f;
         *bodyOut++ = g;
     }
     if (nBodies == 0) std::memset(bodyOut, 0, sizeof(BodyGpu));
@@ -469,6 +489,14 @@ void GlRenderer::drawGravityWells()
         wellQueryPending_[q] = true;
     }
     wellQueryNext_ = 1 - q;
+    ++stats_.drawCalls;
+}
+
+void GlRenderer::drawSkybox()
+{
+    if (!inFrame_ || !frame_ || frame_->skyboxQuality < 0) return;
+    glUseProgram(progSkybox_);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
     ++stats_.drawCalls;
 }
 

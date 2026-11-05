@@ -12,4 +12,5 @@ layout(std140, binding = 0) uniform FrameData {
     vec4  uScale;      // x: metres per pixel, y: pixels per metre, z: time (s, wrapped), w: minimum body diameter (px)
     uvec4 uCounts;     // x: bodies, y: lights, z: shuttles
     vec4  uShuttle;    // x: hull length (m), y: minimum hull length (px)
+    vec4  uVisual;     // x: body quality (0 Low, 1 Medium, 2 High), y: skybox quality, z: skybox seed (0..1)
 };
