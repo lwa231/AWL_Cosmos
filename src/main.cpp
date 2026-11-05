@@ -39,6 +39,7 @@ extern "C" __declspec(dllimport) void __stdcall Sleep(unsigned long ms);   // st
 #include "app/presets.h"
 #include "app/render_frame.h"
 #include "app/settings.h"
+#include "app/visuals.h"
 #include "app/run_control.h"
 #include "app/slow_down.h"
 #include "app/sim_driver.h"
@@ -910,6 +911,8 @@ void fillFrame(const App& app, RenderFrame& frame)
         rb.receivesLight = look.receivesLight;
         rb.emissive = !look.receivesLight;
         rb.isBlackHole = b.kind == BodyKind::BlackHole;
+        applyBodyVisual(b, rb, st.t);   // V1.1 step 3 looks (visual only)
+        if (rb.isBlackHole) diskNormal(st.bodies, frame.bodies.size(), rb.diskNormal);
         frame.bodies.push_back(rb);
         if (look.emitsLight) {
             RenderLight l;
@@ -919,6 +922,10 @@ void fillFrame(const App& app, RenderFrame& frame)
             l.intensity = kStarLightIntensity;
             frame.lights.push_back(l);
         }
+    }
+    {   // V1.1 step 3: the most massive planet-class body in view gets the most detail
+        const int hero = pickDetailBody(st.bodies, frame.bodies, frame.metresPerPixel, frame.viewportWidth, frame.viewportHeight);
+        if (hero >= 0) frame.bodies[static_cast<std::size_t>(hero)].detail = 1.0f;
     }
     for (const DisplayShuttle& s : st.shuttles) {   // dying shuttles are drawn until their contact time
         const Camera::Rel r = cam.toCameraRelative(s.r);
@@ -1711,10 +1718,13 @@ int run(const Options& opt)
                                           frame.explosions);
                     tExplosions = glfwGetTime();
                 }
+                frame.bodyQuality = static_cast<int>(app.prefs.starQuality);       // V1.1 step 3
+                frame.skyboxQuality = static_cast<int>(app.prefs.skyboxQuality);
                 renderer->gpuFrameBegin();
                 renderer->beginFrame(frame);
                 tRenderFill = glfwGetTime();
                 renderer->drawGravityWells();
+                renderer->drawSkybox();
                 renderer->drawAtmospheres();
                 renderer->drawLines(render::LinePass::Underlay);
                 renderer->drawCircles();

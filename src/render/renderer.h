@@ -4,6 +4,7 @@
 // Per-frame use:
 //     renderer.beginFrame(frame);          // uploads the frame description, clears, binds
 //     renderer.drawGravityWells();         // plan 9.4 step 2 (no-op when frame.wells is empty)
+//     renderer.drawSkybox();               // V1.1 step 3: starfield + nebula, additive
 //     renderer.drawAtmospheres();          // step 3 (no-op when frame.atmospheres is empty)
 //     renderer.drawLines(LinePass::Underlay);   // step 4
 //     renderer.drawCircles();              // step 5: Hill / SOI / Roche (no-op when frame.circles is empty)
@@ -80,6 +81,9 @@ public:
 
     virtual void beginFrame(const app::RenderFrame& frame) = 0;
     virtual void drawGravityWells() = 0;                    // plan 9.4 step 2: full-screen potential bands + depth tint
+    // V1.1 step 3: the procedural starfield and nebula, additive, right after drawGravityWells (which replaces the clear
+    // colour). Fixed to the screen. Skipped when frame.skyboxQuality < 0.
+    virtual void drawSkybox() {}
     virtual void drawAtmospheres() = 0;                     // plan 9.4 step 3: radial gradient discs from R to R + top
     virtual void drawCircles() = 0;                         // plan 9.4 step 5: Hill / SOI / Roche outlines
     virtual void drawBodies() = 0;                          // plan 9.4 step 6

@@ -21,6 +21,9 @@ struct RenderColour {
     float r = 1.0f, g = 1.0f, b = 1.0f;
 };
 
+// Procedural look of a body (V1.1 step 3, shaders/body.frag). Plain is the flat or simply lit disc of V1.
+enum class BodyStyle : std::uint32_t { Plain = 0, Star = 1, Rocky = 2, Ocean = 3, GasGiant = 4, Icy = 5, BlackHole = 6 };
+
 // A sphere impostor (a lit disc). Radius is the physical radius; the renderer enforces the minimum marker size.
 struct RenderBody {
     float x = 0.0f, y = 0.0f;   // camera-relative position [m]
@@ -30,6 +33,17 @@ struct RenderBody {
     bool emissive = false;      // stars: drawn flat/bright, ignores lights
     bool receivesLight = true;  // false behaves like emissive (drawn flat)
     bool isBlackHole = false;   // dark disc + thin bright ring in `colour` (plan 9.6)
+
+    // ---- V1.1 step 3 (app/visuals.h fills these; visual only) ----
+    BodyStyle style = BodyStyle::Plain;
+    float temperature = 0.0f;   // stars: effective temperature [K] (granulation, limb and corona colours)
+    float seed = 0.0f;          // 0..1, per body: offsets the noise so no two bodies look alike
+    float spinPhase = 0.0f;     // rad: surface rotation (bands, continents, clouds)
+    float detail = 0.0f;        // 1 for the body that gets the most detail (the most massive planet-class body in view)
+    float cloudCover = 0.0f;    // 0..1
+    RenderColour atmosphereTint{0.45f, 0.65f, 1.0f};
+    float atmosphereRim = 0.0f; // 0..1: strength of the bright limb of the air on the lit side (0 = airless)
+    float diskNormal[3] = {0.0f, 0.0f, 1.0f};   // black holes: unit normal of the accretion disk (+z faces the viewer)
 };
 
 // A light source, camera-relative. Any number (runtime count, no MAX_LIGHTS).
@@ -134,6 +148,11 @@ struct RenderFrame {
     float metresPerPixel = 1.0f;
     double time = 0.0;          // real seconds, for visual animation only (flame flicker)
     float clearColour[3] = {0.0f, 0.0f, 0.02f};
+
+    // V1.1 step 3: detail of the procedural looks, 0 Low, 1 Medium, 2 High (Settings -> Graphics)
+    int bodyQuality = 1;        // stars, planets and black holes (Settings starQuality)
+    int skyboxQuality = 1;      // background starfield and nebula; -1 draws no skybox
+    std::uint32_t skyboxSeed = 0x2024u;   // fixed: the same sky every run
 
     // Minimum on-screen sizes (plan 9.3, 9.6). A real shuttle is ~2 m: invisible without them.
     float bodyMinPixels = 3.0f;         // a body smaller than this (diameter) is drawn as a marker of this size
