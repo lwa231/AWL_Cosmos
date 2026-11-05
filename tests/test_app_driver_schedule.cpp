@@ -126,13 +126,12 @@ TEST_SUITE("app driver schedule")
         SimDriver d(res, SceneSettings{}, SimulationOptions{}, unlimited());
         d.advance(0.125);
         CHECK(d.frameInfo().warp == 1.0);
-        d.warp().stepUp();   // 10
+        d.warp().set(10.0);
         CHECK(d.targetTime() == 0.125);   // nothing already counted moves
         d.advance(0.125);
         CHECK(d.frameInfo().warp == 10.0);
         CHECK(d.targetTime() == 0.125 + 1.25);
-        d.warp().stepUp();
-        d.warp().stepUp();   // 1000
+        d.warp().set(1000.0);
         d.advance(0.125);
         CHECK(d.frameInfo().simDelta == 125.0);
         CHECK(d.targetTime() == 0.125 + 1.25 + 125.0);

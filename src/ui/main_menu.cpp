@@ -78,6 +78,68 @@ void MainMenu::setMessage(const std::string& text, bool isError)
     messageIsError_ = isError;
 }
 
+void MainMenu::askDiscard(MenuAction then, const std::string& savePath)
+{
+    confirmThen_ = then;
+    confirmOpen_ = false;
+    confirmSavePath_ = savePath;
+}
+
+MenuRequest MainMenu::drawConfirm(ImVec2 display, ImFont* titleFont)
+{
+    MenuRequest req;
+    if (confirmThen_ == MenuAction::None) return req;
+    const Palette& pal = palette();
+    const float k = uiScale();
+    const char* id = "Unsaved changes##discard";
+    if (!confirmOpen_) {
+        ImGui::OpenPopup(id);
+        confirmOpen_ = true;
+    }
+    ImGui::SetNextWindowPos(ImVec2(0.5f * display.x, 0.5f * display.y), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22.0f * k, 18.0f * k));
+    const bool open = ImGui::BeginPopupModal(id, nullptr,
+                                             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar |
+                                                 ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar();
+    if (!open) {   // closed from outside (it should not be): forget the question
+        confirmThen_ = MenuAction::None;
+        return req;
+    }
+    if (titleFont) ImGui::PushFont(titleFont, 24.0f);
+    ImGui::TextColored(pal.text, "Discard unsaved changes?");
+    if (titleFont) ImGui::PopFont();
+    ImGui::Spacing();
+    ImGui::TextColored(pal.textDim, "%s", confirmThen_ == MenuAction::Quit ? "The scene has edits that were not saved. Quit anyway?"
+                                                                             : "The scene has edits that were not saved. Return to the menu anyway?");
+    ImGui::Spacing();
+    ImGui::Spacing();
+    const ImVec2 btn(130.0f * k, 36.0f * k);
+    MenuAction then = confirmThen_;
+    bool close = false;
+    if (menuButton(ICON_FA_FLOPPY_DISK "  Save...", btn, true)) {
+        req.action = then;
+        req.confirmed = true;
+        req.saveFirst = true;
+        close = true;
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) ImGui::SetTooltip("Save the scene as %s, then continue", confirmSavePath_.c_str());
+    ImGui::SameLine();
+    if (menuButton(ICON_FA_TRASH "  Discard", btn, false, true)) {
+        req.action = then;
+        req.confirmed = true;
+        close = true;
+    }
+    ImGui::SameLine();
+    if (menuButton(ICON_FA_XMARK "  Cancel", btn)) close = true;
+    if (close) {
+        confirmThen_ = MenuAction::None;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+    return req;
+}
+
 MenuRequest MainMenu::draw(ImVec2 display, ImFont* titleFont, bool blocked)
 {
     switch (mode_) {

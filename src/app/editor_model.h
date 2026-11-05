@@ -107,6 +107,10 @@ public:
     const Scene& scene() const { return scene_; }
     // Increases on every committed change of the scene (and on setScene/restoreScene/reset); selection does not count.
     std::uint64_t revision() const { return revision_; }
+    // Increases on every committed USER edit only (add, delete, duplicate, any setter): unlike revision() it does not move on
+    // setScene / restoreScene / reset, so a run (Pause captures the simulation, Stop restores the snapshot) is not an edit.
+    // The app compares it with the value at the last load or save to know whether there are unsaved edits (V1.1 step 1).
+    std::uint64_t editCount() const { return edits_; }
 
     // A new document: replaces the scene, clears the selection, recomputes the name counters and the ID counter from the
     // scene (they restart; use restoreScene to keep them), sets Recentre::Auto. Works even when locked (it is not an edit of
@@ -172,6 +176,13 @@ public:
     // keeps the position and velocity it was placed at (before the recentring of 5.9 step 4) and switches to state mode, so
     // the geometry of the system is unchanged. Clears the selection if it was the object.
     EditResult remove(std::uint64_t id);
+    // A copy of a body or shuttle with a new ID and the name "<name> copy" ("<name> copy 2", ... when taken), selected
+    // afterwards. In orbit mode the copy has the same elements half an orbit further on (mean anomaly + 180 deg), so it does not
+    // start on top of the original; in state mode it starts beside it (a body 4 radii away along +x, a shuttle 1 km) with
+    // the same velocity. Satellites of the original are not copied. Result id = the new ID, warnings as for addBody.
+    EditResult duplicate(std::uint64_t id);
+    // The name a duplicate of `name` gets (see duplicate): unused by any body or shuttle, at most 64 characters.
+    std::string copyName(const std::string& name) const;
 
     // ---- Editing ------------------------------------------------------------------------------------------------
     EditResult setName(std::uint64_t id, std::string_view name);       // trimmed, 1..64 characters
@@ -237,6 +248,7 @@ private:
 
     Scene scene_;
     std::uint64_t revision_ = 1;
+    std::uint64_t edits_ = 0;
     std::uint64_t selected_ = 0;
     bool locked_ = false;
     Recentre recentre_ = Recentre::Auto;

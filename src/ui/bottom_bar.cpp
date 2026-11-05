@@ -132,22 +132,25 @@ void BottomBar::draw(RunHost& host, ImVec2 display, ImFont* emphasis)
         ImGui::SetNextItemWidth(sliderW);
         const double warp = host.warp();
         float pos = static_cast<float>(app::Warp::sliderFromWarp(warp));
-        const std::string readout = app::formatTimeRate(warp);
+        const std::string readout = app::formatWarp(warp);
         if (ImGui::SliderFloat("##warp", &pos, 0.0f, 1.0f, readout.c_str(), ImGuiSliderFlags_NoInput)) {
-            // magnetic ladder rungs (1, 10, ... 1e6): a drag lands exactly on a rung when it is close to one
-            const float rung = std::round(pos * 6.0f) / 6.0f;
-            if (std::fabs(pos - rung) < 0.014f) pos = rung;
-            host.setWarp(app::Warp::warpFromSlider(pos));
+            // V1.1 step 2: a drag snaps to the nearest stop (1 s/s .. 10 d/s); with Ctrl held it gives a smooth value
+            host.setWarp(app::Warp::warpFromSliderDrag(pos, ImGui::GetIO().KeyCtrl));
         }
-        {   // rung ticks under the track
+        {   // stop ticks under the track: taller at 1 s, 1 min, 1 h and 1 day per second
             const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
             const float inner = st.FramePadding.x + 0.5f * st.GrabMinSize;
-            for (int k = 0; k < 7; ++k) {
-                const float x = std::floor(a.x + inner + (b.x - a.x - 2.0f * inner) * static_cast<float>(k) / 6.0f) + 0.5f;
-                dl->AddLine(ImVec2(x, b.y - 4.0f * s), ImVec2(x, b.y - 1.0f * s), u32(withAlpha(pal.textDim, 0.7f)), 1.0f);
+            for (double stop : app::kWarpLadder) {
+                const bool major = stop == 1.0 || stop == 60.0 || stop == 3600.0 || stop == 86400.0;
+                const float f = static_cast<float>(app::Warp::sliderFromWarp(stop));
+                const float x = std::floor(a.x + inner + (b.x - a.x - 2.0f * inner) * f) + 0.5f;
+                dl->AddLine(ImVec2(x, b.y - (major ? 5.0f : 3.0f) * s), ImVec2(x, b.y - 1.0f * s),
+                            u32(withAlpha(pal.textDim, major ? 0.8f : 0.5f)), 1.0f);
             }
         }
-        tip("Time rate: simulated time per real second (1 s/sec to 1e6 x)");
+        tip("Time rate: simulated time per real second, 1 s/s to 10 d/s.
+Dragging snaps to the stops; hold Ctrl for a smooth value.
+, and . step through the stops, / is real time.");
 
         if (host.canResumeWarp()) {
             ImGui::SameLine();
