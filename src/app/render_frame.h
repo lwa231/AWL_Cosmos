@@ -30,6 +30,7 @@ struct RenderBody {
     bool emissive = false;      // stars: drawn flat/bright, ignores lights
     bool receivesLight = true;  // false behaves like emissive (drawn flat)
     bool isBlackHole = false;   // dark disc + thin bright ring in `colour` (plan 9.6)
+    float z = 0.0f;             // camera-relative height [m] (V1.1 step 5: 3D views project it; the 2D renderer ignores it)
 };
 
 // A light source, camera-relative. Any number (runtime count, no MAX_LIGHTS).
@@ -37,6 +38,7 @@ struct RenderLight {
     float x = 0.0f, y = 0.0f;   // camera-relative position [m]
     RenderColour colour;        // light colour
     float intensity = 1.0f;     // multiplier on colour
+    float z = 0.0f;             // camera-relative height [m] (3D views)
 };
 
 // One shuttle: a triangle of 3 coloured sectors (plan 7.4) plus a flame behind the nozzle.
@@ -46,12 +48,14 @@ struct RenderShuttle {
     RenderColour sector[3];     // the three sector colours (palette triple)
     float throttle = 0.0f;      // 0..1: flame length and brightness
     float flickerPhase = 0.0f;  // rad: per-shuttle phase so flames do not flicker in unison (visual only)
+    float z = 0.0f;             // camera-relative height [m] (3D views)
 };
 
 // Overlay geometry (plan 9.5), camera-relative metres with per-vertex RGBA (straight, not premultiplied alpha).
 struct LineVertex {
     float x = 0.0f, y = 0.0f;
     float r = 1.0f, g = 1.0f, b = 1.0f, a = 1.0f;
+    float z = 0.0f;   // camera-relative height [m] (3D views); last so {x, y, r, g, b, a} initialisers keep working
 };
 
 struct LineStrip {          // `count` consecutive LineBatch::vertices starting at `first`
@@ -99,6 +103,7 @@ struct RenderWell {
     float x = 0.0f, y = 0.0f;   // camera-relative position [m]
     float radius = 1.0f;        // R_j [m]: inside it the potential is flat (the field of an overlapped body is not 1/r)
     float mu = 0.0f;            // G m [m^3/s^2]. A float is enough: 1e20 is far inside its range and 7 digits suit a picture
+    float z = 0.0f;             // camera-relative height [m] (3D views)
 };
 
 // Look of the ring pass. u = log(-Phi) [Phi in m^2/s^2]; a band edge falls at every 1/bandsPerUnit in u.
@@ -118,6 +123,7 @@ struct RenderAtmosphere {
     float top = 0.0f;           // height at which the density reaches the 1e-6 kg/m^3 cutoff [m]; 0 = no bubble
     float scaleHeight = 1.0f;   // H [m]: density falls as exp(-h / H)
     RenderColour tint{0.45f, 0.65f, 1.0f};
+    float z = 0.0f;             // camera-relative height [m] (3D views)
 };
 
 // Hill, sphere-of-influence and Roche circles (plan 5.8, 9.5): outlines of constant pixel width, one style per kind.
@@ -126,6 +132,7 @@ struct RenderCircle {
     float x = 0.0f, y = 0.0f;   // camera-relative centre [m]
     float radius = 1.0f;        // [m]
     CircleKind kind = CircleKind::Hill;
+    float z = 0.0f;             // camera-relative height [m] (3D views)
 };
 
 struct RenderFrame {
