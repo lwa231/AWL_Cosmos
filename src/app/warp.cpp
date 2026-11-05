@@ -1,6 +1,8 @@
 #include "app/warp.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include "app/format.h"
 
 namespace cosmos {
 namespace app {
@@ -78,13 +80,59 @@ bool Warp::resume()
 double Warp::sliderFromWarp(double warp)
 {
     if (!(warp > 1.0)) return 0.0;
-    return std::clamp(std::log10(warp) / 6.0, 0.0, 1.0);
+    if (warp >= kWarpTopStop) return 1.0;
+    return std::clamp(std::log(warp) / std::log(kWarpTopStop), 0.0, 1.0);
 }
 
 double Warp::warpFromSlider(double position)
 {
     if (std::isnan(position)) return 1.0;
-    return std::pow(10.0, 6.0 * std::clamp(position, 0.0, 1.0));
+    const double p = std::clamp(position, 0.0, 1.0);
+    if (p >= 1.0) return kWarpTopStop;
+    return std::pow(kWarpTopStop, p);
+}
+
+double Warp::warpFromSliderDrag(double position, bool smooth)
+{
+    const double w = warpFromSlider(position);
+    return smooth ? w : nearestStop(w);
+}
+
+double nearestStop(double warp)
+{
+    if (!(warp > kWarpLadder.front())) return kWarpLadder.front();   // NaN too
+    for (std::size_t i = 0; i + 1 < kWarpLadder.size(); ++i) {
+        const double lo = kWarpLadder[i], hi = kWarpLadder[i + 1];
+        if (warp <= hi) return warp * warp < lo * hi ? lo : hi;   // compare with the geometric midpoint sqrt(lo hi)
+    }
+    return kWarpLadder.back();
+}
+
+std::string formatWarp(double warp)
+{
+    if (!std::isfinite(warp)) return "-- /s";
+    const double a = std::fabs(warp);
+    const char* unit = "s";
+    double v = warp;
+    // The unit switches where the readout would otherwise show 60 s, 60 min or 24 h
+    if (a >= 86400.0 * (1.0 - 1.0e-9)) { unit = "d"; v = warp / 86400.0; }
+    else if (a >= 3600.0 * (1.0 - 1.0e-9)) { unit = "h"; v = warp / 3600.0; }
+    else if (a >= 60.0 * (1.0 - 1.0e-9)) { unit = "min"; v = warp / 60.0; }
+    std::string num;
+    const double r = std::round(v);
+    if (std::fabs(v - r) <= 1.0e-9 * std::max(1.0, std::fabs(v))) {
+        char buf[32];
+        std::snprintf(buf, sizeof buf, "%.0f", r);
+        num = buf;
+    } else {
+        num = formatSig(v, 3);
+        if (num.find('.') != std::string::npos) {   // "1.50" -> "1.5", "2.00" -> "2"
+            while (!num.empty() && num.back() == '0') num.pop_back();
+            if (!num.empty() && num.back() == '.') num.pop_back();
+        }
+    }
+    if (num == "-0") num = "0";
+    return num + " " + unit + "/s";
 }
 
 } // namespace app

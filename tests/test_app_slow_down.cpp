@@ -69,16 +69,26 @@ Run runFall(SimDriver& d, SlowDown& slow, const std::vector<std::uint64_t>& watc
     return run;
 }
 
+// The warps a full slow-down from `start` passes: start, then every stop below it, down to 1x.
+std::vector<double> stopsFrom(double start)
+{
+    std::vector<double> out = {start};
+    for (std::size_t i = kWarpLadder.size(); i-- > 0;)
+        if (kWarpLadder[i] < start) out.push_back(kWarpLadder[i]);
+    return out;
+}
+
 } // namespace
 
 TEST_SUITE("app slow down")
 {
     TEST_CASE("nextLowerWarp follows the ladder")
     {
-        CHECK(nextLowerWarp(1.0e6) == 1.0e5);
-        CHECK(nextLowerWarp(100.0) == 10.0);
-        CHECK(nextLowerWarp(250.0) == 100.0);
-        CHECK(nextLowerWarp(10.0) == 1.0);
+        CHECK(nextLowerWarp(1.0e6) == 864000.0);
+        CHECK(nextLowerWarp(864000.0) == 432000.0);
+        CHECK(nextLowerWarp(100.0) == 60.0);
+        CHECK(nextLowerWarp(250.0) == 120.0);
+        CHECK(nextLowerWarp(2.0) == 1.0);
         CHECK(nextLowerWarp(1.0) == 1.0);
         CHECK(nextLowerWarp(0.5) == 0.5);
     }
@@ -91,14 +101,8 @@ TEST_SUITE("app slow down")
         const Run run = runFall(d, slow, {kFaller});
         REQUIRE(run.sawEntry);
 
-        // every rung of the ladder, once, in order
-        REQUIRE(run.warps.size() == 6);
-        CHECK(run.warps[0] == 1.0e5);
-        CHECK(run.warps[1] == 1.0e4);
-        CHECK(run.warps[2] == 1.0e3);
-        CHECK(run.warps[3] == 100.0);
-        CHECK(run.warps[4] == 10.0);
-        CHECK(run.warps[5] == 1.0);
+        // every stop below the start, once, in order
+        CHECK(run.warps == stopsFrom(1.0e5));
 
         // at 1x with about 3 s to go (prediction is the osculating two-body conic; the real flight differs a little)
         REQUIRE(run.realAtOne > 0.0);
@@ -125,13 +129,22 @@ TEST_SUITE("app slow down")
         CHECK(r1.subject == kFaller);
         CHECK(r1.steppedDown);
         CHECK(r1.warpBefore == 1.0e6);
-        CHECK(r1.warpAfter == 1.0e5);   // exactly one level, however close the impact is
+        CHECK(r1.warpAfter == 864000.0);   // exactly one level, however close the impact is
         CHECK(r1.timeToImpact > 3.0e4);
         CHECK(r1.timeToImpact < 4.0e4);
-        // same frame state: 1e5 -> 1e4 needs the impact inside 3e4 s, which it is not yet (36000 s)
+        // same frame state: one level per update down to 21600; 21600 -> 7200 needs the impact inside 21600 s, which it is
+        // not yet (about 36000 s)
+        double expectBefore = 864000.0;
+        for (double next : {432000.0, 172800.0, 86400.0, 43200.0, 21600.0}) {
+            const SlowDownReport r = slow.update(d, {kFaller});
+            CHECK(r.steppedDown);
+            CHECK(r.warpBefore == expectBefore);
+            CHECK(r.warpAfter == next);
+            expectBefore = next;
+        }
         const SlowDownReport r2 = slow.update(d, {kFaller});
         CHECK_FALSE(r2.steppedDown);
-        CHECK(r2.warpAfter == 1.0e5);
+        CHECK(r2.warpAfter == 21600.0);
     }
 
     TEST_CASE("an unwatched shuttle does not slow the warp unless the any-shuttle switch is on")
@@ -153,7 +166,7 @@ TEST_SUITE("app slow down")
             slow.options.anyShuttle = true;
             const Run run = runFall(d, slow, {});
             REQUIRE(run.sawEntry);
-            CHECK(run.warps.size() == 6);
+            CHECK(run.warps == stopsFrom(1.0e5));
             CHECK(d.warp().value() == 1.0);
         }
         {
@@ -230,7 +243,7 @@ TEST_SUITE("app slow down")
             }
         }
         REQUIRE(realAtMerge > 0.0);
-        REQUIRE(warps.size() == 6);
+        REQUIRE(warps == stopsFrom(1.0e5));
         REQUIRE(realAtOne > 0.0);
         const double left = realAtMerge - realAtOne;
         CHECK(left > 2.0);

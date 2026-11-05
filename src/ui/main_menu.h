@@ -30,6 +30,9 @@ enum class MenuAction {
 struct MenuRequest {
     MenuAction action = MenuAction::None;
     std::string arg;
+    // From the "Discard unsaved changes?" dialog: the user agreed (Discard or Save), do the action without asking again.
+    bool confirmed = false;
+    bool saveFirst = false;   // the user chose Save: save the scene first, and do the action only if that worked
 };
 
 class MainMenu {
@@ -43,6 +46,17 @@ public:
     void hide();
     // A line under the buttons of the start screen (for example why a scene could not be loaded).
     void setMessage(const std::string& text, bool isError);
+
+    // ---- "Discard unsaved changes?" (V1.1 step 1) --------------------------------------------------------------------
+    // Opens the dialog for an action that would lose unsaved edits (ReturnToMenu or Quit). `savePath` is where Save writes
+    // (shown in its tooltip). drawConfirm then returns the action with confirmed = true on Discard, confirmed and
+    // saveFirst on Save, and nothing on Cancel (or cancelConfirm, which Esc calls).
+    void askDiscard(MenuAction then, const std::string& savePath);
+    bool confirming() const { return confirmThen_ != MenuAction::None; }
+    void cancelConfirm() { confirmThen_ = MenuAction::None; }
+    // Draws the dialog while confirming(). Call every frame after draw() (also when the menu is hidden: Ctrl+Q and closing the
+    // window ask from the scene) and outside any window.
+    MenuRequest drawConfirm(ImVec2 display, ImFont* titleFont);
 
     // Draws the menu if it is active. Call between UiContext::newFrame() and render(), after the other windows (so it is on top of
     // them). `titleFont` is the medium-weight font. `blocked`: the Settings window is open, the menu's buttons do nothing.
@@ -59,6 +73,9 @@ private:
     bool messageIsError_ = false;
     bool openLoadPopup_ = false;
     std::vector<std::string> files_;   // the scene files listed by the Load scene file... popup
+    MenuAction confirmThen_ = MenuAction::None;
+    bool confirmOpen_ = false;          // OpenPopup was called for the current question
+    std::string confirmSavePath_;
 };
 
 } // namespace ui

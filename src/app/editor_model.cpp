@@ -447,6 +447,7 @@ EditResult EditorModel::addBody(BodyKind kind, Vec3 position, Vec3 velocity)
     scene_.bodies.push_back(std::move(b));
     selected_ = scene_.bodies.back().id;
     bump();
+    ++edits_;
 
     EditResult r = EditResult::success(selected_);
     finish(r, selected_, true);
@@ -467,6 +468,7 @@ EditResult EditorModel::addShuttle(ControllerKind controller, Vec3 position, Vec
     scene_.shuttles.push_back(std::move(s));
     selected_ = scene_.shuttles.back().id;
     bump();
+    ++edits_;
 
     EditResult r = EditResult::success(selected_);
     finish(r, selected_, false);
@@ -520,7 +522,67 @@ EditResult EditorModel::remove(std::uint64_t id)
     }
     if (selected_ == id) selected_ = 0;
     bump();
+    ++edits_;
     return EditResult::success(id);
+}
+
+std::string EditorModel::copyName(const std::string& name) const
+{
+    auto used = [this](const std::string& n) {
+        for (const SceneBody& b : scene_.bodies)
+            if (b.name == n) return true;
+        for (const SceneShuttle& s : scene_.shuttles)
+            if (s.name == n) return true;
+        return false;
+    };
+    for (int k = 1;; ++k) {
+        const std::string suffix = k == 1 ? " copy" : " copy " + std::to_string(k);
+        std::string base = name.substr(0, std::min<std::size_t>(name.size(), 64 - suffix.size()));
+        while (!base.empty() && base.back() == ' ') base.pop_back();
+        const std::string candidate = base + suffix;
+        if (!used(candidate)) return candidate;
+    }
+}
+
+EditResult EditorModel::duplicate(std::uint64_t id)
+{
+    if (locked_) return EditResult::failure(kLockedMessage);
+    const ObjectType type = typeOf(id);
+    if (type == ObjectType::None) return EditResult::failure("There is no object with id " + std::to_string(id) + ".");
+    auto halfOrbitOn = [](SceneOrbit& o) {
+        o.meanAnomaly_deg = std::fmod(o.meanAnomaly_deg + 180.0, 360.0);
+        if (o.meanAnomaly_deg < 0.0) o.meanAnomaly_deg += 360.0;
+    };
+    const Scene before = scene_;
+    std::uint64_t newId = 0;
+    if (type == ObjectType::Body) {
+        SceneBody b = *body(id);
+        b.id = takeId();
+        b.name = copyName(b.name);
+        if (b.orbit) halfOrbitOn(*b.orbit);
+        else b.position = b.position + Vec3{4.0 * b.radius, 0.0, 0.0};
+        newId = b.id;
+        scene_.bodies.push_back(std::move(b));
+    } else {
+        SceneShuttle sh = *shuttle(id);
+        sh.id = takeId();
+        sh.name = copyName(sh.name);
+        if (sh.orbit) halfOrbitOn(*sh.orbit);
+        else sh.position = sh.position + Vec3{1000.0, 0.0, 0.0};
+        newId = sh.id;
+        scene_.shuttles.push_back(std::move(sh));
+    }
+    std::string err;
+    if (!validateScene(scene_, err)) {
+        scene_ = before;
+        return EditResult::failure(err);
+    }
+    selected_ = newId;
+    bump();
+    ++edits_;
+    EditResult r = EditResult::success(newId);
+    finish(r, newId, type == ObjectType::Body);
+    return r;
 }
 
 // ---- editing -----------------------------------------------------------------------------------------------------------
@@ -542,6 +604,7 @@ EditResult EditorModel::commitBody(std::uint64_t id, const std::function<void(Sc
         return EditResult::failure(err);
     }
     bump();
+    ++edits_;
     EditResult r = EditResult::success(id);
     finish(r, id, b.mu != old.mu && !wasDominant);   // only when this edit makes it dominant
     return r;
@@ -563,6 +626,7 @@ EditResult EditorModel::commitShuttle(std::uint64_t id, const std::function<void
         return EditResult::failure(err);
     }
     bump();
+    ++edits_;
     EditResult r = EditResult::success(id);
     finish(r, id, false);
     return r;
